@@ -64,6 +64,7 @@ ANSI_RED = "\033[31m"
 ANSI_MAGENTA = "\033[35m"
 ANSI_ORANGE = "\033[38;5;208m"
 CAFFEINATE_PATH = "/usr/bin/caffeinate"
+ASCII_ART_TOP_PADDING = 3
 
 LEVEL_METER_ASCII_ART = (
     "_      _              _             _     _         _                                      _",
@@ -724,8 +725,11 @@ class ChunkedAudioRecorder(NSObject):
             return
 
         print("\033[2J\033[H", end="", flush=True)
+        for _ in range(ASCII_ART_TOP_PADDING):
+            print("", flush=True)
         for line in LEVEL_METER_ASCII_ART:
             print(self._ansi_style(line.rstrip(), ANSI_ORANGE, bold=True), flush=True)
+        print("", flush=True)
 
         self.meter_header_rendered = True
 
@@ -740,7 +744,7 @@ class ChunkedAudioRecorder(NSObject):
             + " " * padding
             + self._ansi_style(" |", ANSI_GREEN, bold=True)
         )
-        return [border, content, border]
+        return [border, content, border, ""]
 
     def _build_info_table(self, rows: List[tuple[str, str]]) -> List[str]:
         terminal_width = self._get_terminal_width(minimum=48)
@@ -749,7 +753,7 @@ class ChunkedAudioRecorder(NSObject):
         value_width = max(16, max_table_width - key_width - 7)
         border = self._ansi_style(
             f"+{'-' * (key_width + 2)}+{'-' * (value_width + 2)}+",
-            ANSI_BLUE,
+            ANSI_ORANGE,
             bold=True,
         )
 
@@ -757,12 +761,14 @@ class ChunkedAudioRecorder(NSObject):
         for label, value in rows:
             fitted_label = self._truncate_plain_text(label, key_width)
             fitted_value = self._truncate_plain_text(value, value_width)
+            label_cell = self._ansi_style(f" {fitted_label:<{key_width}} ", ANSI_YELLOW, bold=True)
+            value_cell = self._ansi_style(f" {fitted_value:<{value_width}} ", ANSI_ORANGE, bold=True)
             lines.append(
-                self._ansi_style(
-                    f"| {fitted_label:<{key_width}} | {fitted_value:<{value_width}} |",
-                    ANSI_BLUE,
-                    bold=True,
-                )
+                f"{self._ansi_style('|', ANSI_ORANGE, bold=True)}"
+                f"{label_cell}"
+                f"{self._ansi_style('|', ANSI_ORANGE, bold=True)}"
+                f"{value_cell}"
+                f"{self._ansi_style('|', ANSI_ORANGE, bold=True)}"
             )
         lines.append(border)
         return lines
