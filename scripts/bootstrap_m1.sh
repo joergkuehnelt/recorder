@@ -3,45 +3,27 @@
 set -euo pipefail
 
 SCRIPT_DIR=${0:A:h}
-PROJECT_ROOT=${SCRIPT_DIR:h}
+source "$SCRIPT_DIR/common_m1.sh"
+
+PROJECT_ROOT=$(project_root_from_script "$0")
 cd "$PROJECT_ROOT"
 
-if [[ "$(uname -s)" != "Darwin" ]]; then
-  echo "This bootstrap script is for macOS only." >&2
-  exit 1
-fi
+require_macos_arm64_host
 
-if [[ "$(uname -m)" != "arm64" ]]; then
-  echo "This project targets Apple Silicon. Current architecture: $(uname -m)" >&2
-  exit 1
-fi
-
-PYTHON_BIN=${PYTHON_BIN:-python3}
-
-if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
-  echo "Python executable not found: $PYTHON_BIN" >&2
-  exit 1
-fi
-
-PYTHON_CHECK=$(
-  "$PYTHON_BIN" - <<'PY'
-import platform
-import sys
-
-major, minor = sys.version_info[:2]
-machine = platform.machine()
-
-if (major, minor) < (3, 9):
-    raise SystemExit("Python 3.9 or newer is required.")
-
-if machine != "arm64":
-    raise SystemExit(f"Python must run natively as arm64, got {machine}.")
-
-print(sys.executable)
-PY
-)
+PYTHON_BIN=$(detect_python_bin "${PYTHON_BIN:-}")
+PYTHON_CHECK=$(python_env_summary "$PYTHON_BIN")
 
 echo "Using Python: $PYTHON_CHECK"
+
+if [[ -d .venv && ! -x .venv/bin/python ]]; then
+  echo "Existing .venv is incomplete. Recreating it."
+  rm -rf .venv
+fi
+
+if [[ -d .venv && ! $(venv_python_healthy .venv/bin/python; echo $?) -eq 0 ]]; then
+  echo "Existing .venv does not match the required Python version or architecture. Recreating it."
+  rm -rf .venv
+fi
 
 if [[ ! -d .venv ]]; then
   "$PYTHON_BIN" -m venv .venv
@@ -51,6 +33,12 @@ source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -e .
 python -m compileall src
+
+if [[ -x scripts/post_install_check.sh ]]; then
+  echo
+  echo "Running post-install verification..."
+  ./scripts/post_install_check.sh
+fi
 
 cat <<'EOF'
 

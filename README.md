@@ -54,6 +54,21 @@ Example:
 - Python 3.9 or newer running as arm64, with 3.11 recommended
 - Microphone permission granted to the terminal app you use
 
+## Quick Install From Git
+
+On another MacBook Pro M1, the simplest install path is directly from Git:
+
+```bash
+git clone https://github.com/joergkuehnelt/recorder.git recorder
+cd recorder
+chmod +x scripts/bootstrap_m1.sh scripts/post_install_check.sh scripts/run_recorder.sh
+./scripts/bootstrap_m1.sh
+./scripts/post_install_check.sh
+./scripts/run_recorder.sh
+```
+
+This path is recommended when the target Mac has Git access to the repository and you want the easiest update path later with `git pull`.
+
 ## Setup
 
 ```bash
@@ -62,6 +77,21 @@ source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -e .
 ```
+
+For a more failsafe local install and run flow, prefer the scripts in `scripts/` instead of manual setup:
+
+```bash
+chmod +x scripts/bootstrap_m1.sh scripts/post_install_check.sh scripts/run_recorder.sh
+./scripts/bootstrap_m1.sh
+./scripts/run_recorder.sh
+```
+
+What this changes:
+
+- `bootstrap_m1.sh` recreates a broken or wrong-architecture `.venv` automatically
+- `bootstrap_m1.sh` runs the post-install verification automatically after install
+- `run_recorder.sh` repairs a missing or invalid local install before starting the recorder
+- `run_recorder.sh` launches the recorder through the project venv, so you do not have to activate it manually
 
 ## Deployment To Another MacBook Pro M1
 
@@ -90,7 +120,7 @@ cd recorder
 chmod +x scripts/bootstrap_m1.sh scripts/post_install_check.sh
 ./scripts/bootstrap_m1.sh
 ./scripts/post_install_check.sh
-python -m sound_recorder --segment-minutes 1
+./scripts/run_recorder.sh --segment-minutes 1
 ```
 
 What this gives you:
@@ -128,6 +158,8 @@ chmod +x scripts/bootstrap_m1.sh
 ./scripts/bootstrap_m1.sh
 chmod +x scripts/post_install_check.sh
 ./scripts/post_install_check.sh
+chmod +x scripts/run_recorder.sh
+./scripts/run_recorder.sh --segment-minutes 1
 ```
 
 What the bootstrap script does:
@@ -207,7 +239,8 @@ chmod +x scripts/post_install_check.sh
 Then start a short smoke test:
 
 ```bash
-python -m sound_recorder --segment-minutes 1
+chmod +x scripts/run_recorder.sh
+./scripts/run_recorder.sh --segment-minutes 1
 ```
 
 ## VS Code Tasks

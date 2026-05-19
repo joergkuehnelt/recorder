@@ -3,20 +3,14 @@
 set -euo pipefail
 
 SCRIPT_DIR=${0:A:h}
-PROJECT_ROOT=${SCRIPT_DIR:h}
+source "$SCRIPT_DIR/common_m1.sh"
+
+PROJECT_ROOT=$(project_root_from_script "$0")
 cd "$PROJECT_ROOT"
 
-if [[ "$(uname -s)" != "Darwin" ]]; then
-  echo "Post-install check is for macOS only." >&2
-  exit 1
-fi
+require_macos_arm64_host
 
-if [[ "$(uname -m)" != "arm64" ]]; then
-  echo "Expected Apple Silicon machine, got: $(uname -m)" >&2
-  exit 1
-fi
-
-if [[ ! -x .venv/bin/python ]]; then
+if ! venv_python_healthy .venv/bin/python; then
   echo "Virtual environment not found. Run scripts/bootstrap_m1.sh first." >&2
   exit 1
 fi
