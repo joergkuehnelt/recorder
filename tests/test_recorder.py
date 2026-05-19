@@ -315,7 +315,7 @@ class TestCueSidecar:
 
         assert len(rec.segment_track_events) == 1
 
-    def test_merge_track_events_prefers_last_state_timing_for_same_track(self, tmp_path):
+    def test_merge_track_events_keeps_earliest_time_for_same_track(self, tmp_path):
         from sound_recorder.recorder import CombinedTrackEvent, build_recorder
 
         rec = build_recorder(device_id="d", output_dir=tmp_path, segment_minutes=10)
@@ -342,6 +342,37 @@ class TestCueSidecar:
 
         assert len(merged) == 1
         assert merged[0].source == "last_state"
+        assert merged[0].observed_at == datetime(2026, 5, 20, 9, 15, 0)
+
+    def test_start_segment_refreshes_last_state_before_first_track_event(self, tmp_path):
+        from sound_recorder.recorder import build_recorder
+
+        rec = build_recorder(device_id="d", output_dir=tmp_path, segment_minutes=10)
+        captured_display = []
+        rec._load_last_state_display = lambda: "09:15 => FRESH ARTIST => Fresh Song"
+        rec._write_session_lock = lambda *_args, **_kwargs: None
+        rec._log_line = lambda *_args, **_kwargs: None
+
+        class DummyAudioOutput:
+            def isRecording(self):
+                return False
+
+            def startRecordingToOutputFileURL_outputFileType_recordingDelegate_(self, *_args):
+                return None
+
+        rec.audio_output = DummyAudioOutput()
+
+        original_capture = rec._capture_segment_track_event
+
+        def capture_with_probe(observed_at, force=False):
+            captured_display.append(rec.last_state_display)
+            return original_capture(observed_at, force=force)
+
+        rec._capture_segment_track_event = capture_with_probe
+        rec._start_segment()
+
+        assert captured_display[0] == "09:15 => FRESH ARTIST => Fresh Song"
+        assert rec.segment_track_events[0].display_text == "09:15 => FRESH ARTIST => Fresh Song"
 
     def test_format_cue_index_uses_cd_frames(self):
         from sound_recorder.recorder import ChunkedAudioRecorder

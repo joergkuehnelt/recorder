@@ -315,6 +315,8 @@ class ChunkedAudioRecorder(NSObject):
         self.peak_hold_dbfs = METER_FLOOR_DBFS
         self.last_peak_sample_at = time.monotonic()
         self.segment_track_events = []
+        self.last_state_refresh_at = 0.0
+        self.last_state_display = self._load_last_state_display()
         self._capture_segment_track_event(started_at, force=True)
         self._write_session_lock(temp_path)
 
@@ -770,8 +772,17 @@ class ChunkedAudioRecorder(NSObject):
             same_track = previous.artist == event.artist and previous.title == event.title
             close_in_time = abs((event.observed_at - previous.observed_at).total_seconds()) <= SONG_HISTORY_MATCH_WINDOW_SECONDS
             if same_track and close_in_time:
-                if previous.source == "song_history" and event.source == "last_state":
-                    merged[-1] = event
+                earliest_event = previous if previous.observed_at <= event.observed_at else event
+                preferred_source = previous if previous.source == "last_state" else event
+                merged[-1] = CombinedTrackEvent(
+                    observed_at=earliest_event.observed_at,
+                    display_text=preferred_source.display_text,
+                    artist=preferred_source.artist,
+                    title=preferred_source.title,
+                    source=preferred_source.source,
+                    source_path=preferred_source.source_path,
+                    raw_line=preferred_source.raw_line,
+                )
                 continue
 
             merged.append(event)
