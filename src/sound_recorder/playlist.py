@@ -29,6 +29,21 @@ IGNORED_DIRECTORY_NAMES = {
     ".Trash",
 }
 URL_RE = re.compile(r"\s*(?:\||-)?\s*https?://\S+")
+SONG_HISTORY_LINE_RE = re.compile(
+    r"^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}) \| "
+    r"(?P<artist>.+?) - (?P<title>.+?)"
+    r"(?: \| (?P<url>https?://\S*))?$"
+)
+
+
+@dataclass
+class SongHistoryEntry:
+    observed_at: datetime
+    artist: str
+    title: str
+    display_text: str
+    raw_line: str
+    url: Optional[str] = None
 
 
 @dataclass
@@ -271,6 +286,49 @@ def read_last_song_history_entry(path: Optional[Path]) -> Optional[str]:
     return None
 
 
+def read_song_history_entries(path: Optional[Path]) -> List[SongHistoryEntry]:
+    if path is None or not path.is_file():
+        return []
+
+    try:
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return []
+
+    entries: List[SongHistoryEntry] = []
+    for raw_line in lines:
+        parsed = parse_song_history_line(raw_line)
+        if parsed is not None:
+            entries.append(parsed)
+    return entries
+
+
+def parse_song_history_line(raw_line: str) -> Optional[SongHistoryEntry]:
+    match = SONG_HISTORY_LINE_RE.match(raw_line.strip())
+    if match is None:
+        return None
+
+    try:
+        observed_at = datetime.strptime(match.group("timestamp"), "%Y-%m-%d %H:%M")
+    except ValueError:
+        return None
+
+    artist = match.group("artist").strip()
+    title = match.group("title").strip()
+    if not artist or not title:
+        return None
+
+    display_text = f"{observed_at:%H:%M} => {artist.upper()} => {title}"
+    return SongHistoryEntry(
+        observed_at=observed_at,
+        artist=artist.upper(),
+        title=title,
+        display_text=display_text,
+        raw_line=raw_line.rstrip(),
+        url=match.group("url") or None,
+    )
+
+
 def read_last_state_entry(path: Optional[Path]) -> Optional[str]:
     if path is None or not path.is_file():
         return None
@@ -332,6 +390,11 @@ def build_script_launch_command(script_path: Path) -> str:
     if script_path.suffix.lower() == ".py":
         return f"/usr/bin/env python3 {quoted_path}"
     return f"/bin/zsh {quoted_path}"
+
+
+def get_remembered_song_history_path(state_path: Path = LOCAL_STATE_PATH) -> Optional[Path]:
+    state = _load_local_state(state_path)
+    return _resolve_saved_path(state.get("song_history_log_path"))
 
 
 def _choose_playlist_script(

@@ -13,7 +13,7 @@ import termios
 import time
 import tty
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -27,7 +27,12 @@ from AVFoundation import (
 from Foundation import NSDate, NSObject, NSRunLoop, NSURL
 
 from sound_recorder.devices import find_input_device
-from sound_recorder.playlist import LOCAL_STATE_PATH, read_last_state_entry
+from sound_recorder.playlist import (
+    LOCAL_STATE_PATH,
+    get_remembered_song_history_path,
+    read_last_state_entry,
+    read_song_history_entries,
+)
 
 
 PARTIAL_FILE_SUFFIX = ".partial.m4a"
@@ -46,6 +51,7 @@ MAX_CHANNEL_VOLUME = 1.00
 METER_BAR_WIDTH = 36
 PEAK_HOLD_DECAY_DB_PER_SECOND = 14.0
 LAST_STATE_REFRESH_SECONDS = 1.0
+SONG_HISTORY_MATCH_WINDOW_SECONDS = 90.0
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 ANSI_RESET = "\033[0m"
 ANSI_BOLD = "\033[1m"
@@ -93,6 +99,24 @@ class ActiveSegment:
     temp_path: Path
 
 
+@dataclass
+class SegmentTrackEvent:
+    observed_at: datetime
+    display_text: str
+    source_path: Optional[str]
+
+
+@dataclass
+class CombinedTrackEvent:
+    observed_at: datetime
+    display_text: str
+    artist: str
+    title: str
+    source: str
+    source_path: Optional[str]
+    raw_line: Optional[str] = None
+
+
 class ChunkedAudioRecorder(NSObject):
     def initWithDeviceID_outputDir_segmentMinutes_(
         self,
@@ -135,6 +159,8 @@ class ChunkedAudioRecorder(NSObject):
         self.last_peak_sample_at = time.monotonic()
         self.last_state_display = "NO DETECTION"
         self.last_state_refresh_at = 0.0
+        self.last_state_source_path: Optional[str] = None
+        self.segment_track_events: List[SegmentTrackEvent] = []
         self.meter_header_rendered = False
         self.status_line_width = 0
         self.use_color_output = sys.stdout.isatty()
@@ -260,6 +286,7 @@ class ChunkedAudioRecorder(NSObject):
         final_path = self.output_dir / _format_output_name(segment.started_at, ended_at)
         final_path = self._deduplicate(final_path)
         recorded_path.replace(final_path)
+        self._write_segment_sidecar(final_path, segment.started_at, ended_at)
         self._log_line(f"Saved {final_path.name}")
 
         if should_restart:
@@ -287,6 +314,8 @@ class ChunkedAudioRecorder(NSObject):
         self.awaiting_finish = False
         self.peak_hold_dbfs = METER_FLOOR_DBFS
         self.last_peak_sample_at = time.monotonic()
+        self.segment_track_events = []
+        self._capture_segment_track_event(started_at, force=True)
         self._write_session_lock(temp_path)
 
         temp_url = NSURL.fileURLWithPath_(str(temp_path))
@@ -607,6 +636,8 @@ class ChunkedAudioRecorder(NSObject):
 
         self.last_state_refresh_at = now
         self.last_state_display = self._load_last_state_display()
+        if self.active_segment is not None:
+            self._capture_segment_track_event(datetime.now())
         return self.last_state_display
 
     def _load_last_state_display(self) -> str:
@@ -620,11 +651,217 @@ class ChunkedAudioRecorder(NSObject):
 
         raw_path = payload.get("last_state_json_path")
         if not isinstance(raw_path, str) or not raw_path:
+            self.last_state_source_path = None
             return "NO DETECTION"
 
         last_state_path = Path(raw_path).expanduser()
-        entry = read_last_state_entry(last_state_path.resolve() if last_state_path.exists() else None)
+        resolved_path = last_state_path.resolve() if last_state_path.exists() else None
+        self.last_state_source_path = str(resolved_path) if resolved_path is not None else None
+        entry = read_last_state_entry(resolved_path)
         return entry or "NO DETECTION"
+
+    def _capture_segment_track_event(self, observed_at: datetime, force: bool = False) -> None:
+        if self.active_segment is None:
+            return
+
+        display_text = self.last_state_display or "NO DETECTION"
+        if not force and self.segment_track_events:
+            if self.segment_track_events[-1].display_text == display_text:
+                return
+
+        self.segment_track_events.append(
+            SegmentTrackEvent(
+                observed_at=observed_at,
+                display_text=display_text,
+                source_path=self.last_state_source_path,
+            )
+        )
+
+    def _write_segment_sidecar(
+        self,
+        audio_path: Path,
+        segment_started_at: datetime,
+        segment_ended_at: datetime,
+    ) -> None:
+        sidecar_path = audio_path.with_suffix(".cuesheet.json")
+        track_events = self._collect_combined_track_events(segment_started_at, segment_ended_at)
+        if not track_events:
+            artist, title = self._parse_track_display(self.last_state_display or "NO DETECTION")
+            track_events = [
+                CombinedTrackEvent(
+                    observed_at=segment_started_at,
+                    display_text=self.last_state_display or "NO DETECTION",
+                    artist=artist,
+                    title=title,
+                    source="last_state",
+                    source_path=self.last_state_source_path,
+                )
+            ]
+        payload = {
+            "audio_file": audio_path.name,
+            "segment_started_at": segment_started_at.isoformat(timespec="seconds"),
+            "segment_ended_at": segment_ended_at.isoformat(timespec="seconds"),
+            "segment_duration_seconds": max(
+                0.0,
+                round((segment_ended_at - segment_started_at).total_seconds(), 3),
+            ),
+            "tracks": [
+                self._build_sidecar_track_payload(
+                    event,
+                    segment_started_at,
+                    segment_ended_at,
+                    index,
+                    len(track_events),
+                )
+                for index, event in enumerate(track_events, start=1)
+            ],
+        }
+        sidecar_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        self._write_segment_cue_sheet(audio_path, payload)
+
+    def _collect_combined_track_events(
+        self,
+        segment_started_at: datetime,
+        segment_ended_at: datetime,
+    ) -> List[CombinedTrackEvent]:
+        combined: List[CombinedTrackEvent] = []
+        for event in self.segment_track_events:
+            artist, title = self._parse_track_display(event.display_text)
+            combined.append(
+                CombinedTrackEvent(
+                    observed_at=event.observed_at,
+                    display_text=event.display_text,
+                    artist=artist,
+                    title=title,
+                    source="last_state",
+                    source_path=event.source_path,
+                )
+            )
+
+        song_history_path = get_remembered_song_history_path()
+        window_start = segment_started_at - timedelta(seconds=60)
+        window_end = segment_ended_at + timedelta(seconds=60)
+        for entry in read_song_history_entries(song_history_path):
+            if entry.observed_at < window_start or entry.observed_at > window_end:
+                continue
+            combined.append(
+                CombinedTrackEvent(
+                    observed_at=entry.observed_at,
+                    display_text=entry.display_text,
+                    artist=entry.artist,
+                    title=entry.title,
+                    source="song_history",
+                    source_path=str(song_history_path) if song_history_path is not None else None,
+                    raw_line=entry.raw_line,
+                )
+            )
+
+        return self._merge_track_events(combined)
+
+    def _merge_track_events(self, events: List[CombinedTrackEvent]) -> List[CombinedTrackEvent]:
+        merged: List[CombinedTrackEvent] = []
+        source_priority = {"last_state": 0, "song_history": 1}
+        for event in sorted(events, key=lambda item: (item.observed_at, source_priority.get(item.source, 9))):
+            if not merged:
+                merged.append(event)
+                continue
+
+            previous = merged[-1]
+            same_track = previous.artist == event.artist and previous.title == event.title
+            close_in_time = abs((event.observed_at - previous.observed_at).total_seconds()) <= SONG_HISTORY_MATCH_WINDOW_SECONDS
+            if same_track and close_in_time:
+                if previous.source == "song_history" and event.source == "last_state":
+                    merged[-1] = event
+                continue
+
+            merged.append(event)
+
+        return merged
+
+    def _build_sidecar_track_payload(
+        self,
+        event: CombinedTrackEvent,
+        segment_started_at: datetime,
+        segment_ended_at: datetime,
+        index: int,
+        total_tracks: int,
+    ) -> Dict[str, Any]:
+        offset_seconds = max(
+            0.0,
+            round((event.observed_at - segment_started_at).total_seconds(), 3),
+        )
+        if event.observed_at > segment_ended_at:
+            offset_seconds = max(
+                0.0,
+                round((segment_ended_at - segment_started_at).total_seconds(), 3),
+            )
+
+        return {
+            "track_number": index,
+            "offset_seconds": offset_seconds,
+            "observed_at": event.observed_at.isoformat(timespec="seconds"),
+            "display": event.display_text,
+            "artist": event.artist,
+            "title": event.title,
+            "source": event.source,
+            "source_path": event.source_path,
+            "raw_line": event.raw_line,
+            "partial_at_start": index == 1,
+            "partial_at_end": index == total_tracks,
+        }
+
+    def _write_segment_cue_sheet(self, audio_path: Path, payload: Dict[str, Any]) -> None:
+        cue_path = audio_path.with_suffix(".cue")
+        lines = [
+            f'FILE "{self._escape_cue_text(audio_path.name)}" MP4',
+        ]
+
+        tracks = payload.get("tracks", [])
+        if not isinstance(tracks, list):
+            tracks = []
+
+        for track in tracks:
+            if not isinstance(track, dict):
+                continue
+
+            track_number = int(track.get("track_number", 1))
+            title = str(track.get("title") or "NO DETECTION")
+            artist = str(track.get("artist") or "UNKNOWN")
+            offset_seconds = float(track.get("offset_seconds", 0.0))
+
+            lines.extend(
+                [
+                    f"  TRACK {track_number:02d} AUDIO",
+                    f'    TITLE "{self._escape_cue_text(title)}"',
+                    f'    PERFORMER "{self._escape_cue_text(artist)}"',
+                    f"    INDEX 01 {self._format_cue_index(offset_seconds)}",
+                ]
+            )
+
+        cue_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    @staticmethod
+    def _parse_track_display(display_text: str) -> tuple[str, str]:
+        parts = [part.strip() for part in display_text.split("=>")]
+        if len(parts) >= 3:
+            return parts[1] or "UNKNOWN", parts[2] or "NO DETECTION"
+        if len(parts) == 2 and parts[1].upper() == "NO DETECTION":
+            return "UNKNOWN", "NO DETECTION"
+        cleaned = display_text.strip()
+        if not cleaned:
+            return "UNKNOWN", "NO DETECTION"
+        return "UNKNOWN", cleaned
+
+    @staticmethod
+    def _format_cue_index(offset_seconds: float) -> str:
+        total_frames = max(0, int(round(offset_seconds * 75)))
+        minutes, remaining_frames = divmod(total_frames, 75 * 60)
+        seconds, frames = divmod(remaining_frames, 75)
+        return f"{minutes:02d}:{seconds:02d}:{frames:02d}"
+
+    @staticmethod
+    def _escape_cue_text(text: str) -> str:
+        return text.replace('"', "'")
 
     def _fit_status_message(self, message: str) -> str:
         terminal_width = shutil.get_terminal_size((160, 24)).columns

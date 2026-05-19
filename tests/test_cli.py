@@ -14,6 +14,8 @@ from sound_recorder.playlist import (
     discover_playlist_script_candidates,
     find_last_state_file,
     find_song_history_log,
+    parse_song_history_line,
+    read_song_history_entries,
     read_last_state_entry,
     read_last_song_history_entry,
     sanitize_song_history_entry,
@@ -143,6 +145,29 @@ class TestPlaylistHelpers:
         )
 
         assert read_last_song_history_entry(history) == "Latest Artist - Great Song"
+
+    def test_parse_song_history_line_parses_timestamp_artist_title_and_url(self):
+        entry = parse_song_history_line(
+            "2026-05-14 23:28 | Little Milton - Grits Ain't Groceries | https://example.com/art.jpg"
+        )
+
+        assert entry is not None
+        assert entry.artist == "LITTLE MILTON"
+        assert entry.title == "Grits Ain't Groceries"
+        assert entry.display_text == "23:28 => LITTLE MILTON => Grits Ain't Groceries"
+        assert entry.url == "https://example.com/art.jpg"
+
+    def test_read_song_history_entries_skips_session_markers(self, tmp_path):
+        history = tmp_path / "song_history.log"
+        history.write_text(
+            "--- New Session Started: 2026-05-14 22:45:38 ---\n"
+            "2026-05-14 22:46 | Menahan Street Band - Devil's Respite\n",
+            encoding="utf-8",
+        )
+
+        entries = read_song_history_entries(history)
+        assert len(entries) == 1
+        assert entries[0].artist == "MENAHAN STREET BAND"
 
     def test_read_last_state_entry_formats_time_artist_and_title(self, tmp_path):
         last_state = tmp_path / "last_state.json"

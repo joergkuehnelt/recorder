@@ -248,6 +248,109 @@ class TestBuildRecorder:
         assert rec.is_configured is False
 
 
+class TestCueSidecar:
+    def test_write_segment_sidecar_creates_json_payload(self, tmp_path):
+        from sound_recorder.recorder import CombinedTrackEvent, build_recorder
+
+        rec = build_recorder(device_id="d", output_dir=tmp_path, segment_minutes=10)
+        started_at = datetime(2026, 5, 20, 9, 15, 0)
+        ended_at = datetime(2026, 5, 20, 10, 15, 0)
+        audio_path = tmp_path / "19052026-start0915-end1015.m4a"
+        rec._collect_combined_track_events = lambda *_args: [
+            CombinedTrackEvent(
+                observed_at=started_at,
+                display_text="09:15 => ARTIST A => Song One",
+                artist="ARTIST A",
+                title="Song One",
+                source="last_state",
+                source_path="/tmp/last_state.json",
+            ),
+            CombinedTrackEvent(
+                observed_at=datetime(2026, 5, 20, 9, 30, 0),
+                display_text="09:30 => NO DETECTION",
+                artist="UNKNOWN",
+                title="NO DETECTION",
+                source="song_history",
+                source_path="/tmp/last_state.json",
+                raw_line="2026-05-20 09:30 | Unknown - NO DETECTION",
+            ),
+        ]
+
+        rec._write_segment_sidecar(audio_path, started_at, ended_at)
+
+        payload = json.loads(audio_path.with_suffix(".cuesheet.json").read_text(encoding="utf-8"))
+        cue_text = audio_path.with_suffix(".cue").read_text(encoding="utf-8")
+        assert payload["audio_file"] == audio_path.name
+        assert payload["segment_started_at"] == "2026-05-20T09:15:00"
+        assert payload["segment_ended_at"] == "2026-05-20T10:15:00"
+        assert len(payload["tracks"]) == 2
+        assert payload["tracks"][0]["offset_seconds"] == 0.0
+        assert payload["tracks"][0]["artist"] == "ARTIST A"
+        assert payload["tracks"][0]["title"] == "Song One"
+        assert payload["tracks"][0]["source"] == "last_state"
+        assert payload["tracks"][0]["partial_at_end"] is False
+        assert payload["tracks"][1]["offset_seconds"] == 900.0
+        assert payload["tracks"][1]["display"] == "09:30 => NO DETECTION"
+        assert payload["tracks"][1]["artist"] == "UNKNOWN"
+        assert payload["tracks"][1]["title"] == "NO DETECTION"
+        assert payload["tracks"][1]["source"] == "song_history"
+        assert payload["tracks"][1]["partial_at_end"] is True
+        assert 'FILE "19052026-start0915-end1015.m4a" MP4' in cue_text
+        assert '  TRACK 01 AUDIO' in cue_text
+        assert '    TITLE "Song One"' in cue_text
+        assert '    PERFORMER "ARTIST A"' in cue_text
+        assert '    INDEX 01 15:00:00' in cue_text
+
+    def test_capture_segment_track_event_deduplicates_same_display(self, tmp_path):
+        from sound_recorder.recorder import ActiveSegment, build_recorder
+
+        rec = build_recorder(device_id="d", output_dir=tmp_path, segment_minutes=10)
+        started_at = datetime(2026, 5, 20, 9, 15, 0)
+        rec.active_segment = ActiveSegment(started_at=started_at, temp_path=tmp_path / "temp.m4a")
+        rec.last_state_display = "09:15 => ARTIST A => Song One"
+        rec.last_state_source_path = "/tmp/last_state.json"
+
+        rec._capture_segment_track_event(started_at, force=True)
+        rec._capture_segment_track_event(datetime(2026, 5, 20, 9, 16, 0))
+
+        assert len(rec.segment_track_events) == 1
+
+    def test_merge_track_events_prefers_last_state_timing_for_same_track(self, tmp_path):
+        from sound_recorder.recorder import CombinedTrackEvent, build_recorder
+
+        rec = build_recorder(device_id="d", output_dir=tmp_path, segment_minutes=10)
+        merged = rec._merge_track_events(
+            [
+                CombinedTrackEvent(
+                    observed_at=datetime(2026, 5, 20, 9, 15, 0),
+                    display_text="09:15 => ARTIST A => Song One",
+                    artist="ARTIST A",
+                    title="Song One",
+                    source="song_history",
+                    source_path="/tmp/song_history.log",
+                ),
+                CombinedTrackEvent(
+                    observed_at=datetime(2026, 5, 20, 9, 15, 5),
+                    display_text="09:15 => ARTIST A => Song One",
+                    artist="ARTIST A",
+                    title="Song One",
+                    source="last_state",
+                    source_path="/tmp/last_state.json",
+                ),
+            ]
+        )
+
+        assert len(merged) == 1
+        assert merged[0].source == "last_state"
+
+    def test_format_cue_index_uses_cd_frames(self):
+        from sound_recorder.recorder import ChunkedAudioRecorder
+
+        assert ChunkedAudioRecorder._format_cue_index(0.0) == "00:00:00"
+        assert ChunkedAudioRecorder._format_cue_index(1.0) == "00:01:00"
+        assert ChunkedAudioRecorder._format_cue_index(90.5) == "01:30:38"
+
+
 # ---------------------------------------------------------------------------
 # Recover stale partials
 # ---------------------------------------------------------------------------
