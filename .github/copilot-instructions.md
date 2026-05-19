@@ -1,0 +1,15 @@
+- [x] Verify that the copilot-instructions.md file in the .github directory is created.
+- [x] Clarify project requirements.
+- [x] Scaffold the project in the current directory.
+- [x] Customize the project for a macOS Apple Silicon CLI recorder.
+- [x] Install required extensions. No extensions needed.
+- [x] Compile the project.
+- [x] Create and run a task.
+- [x] Launch the project. Skipped intentionally until dependencies are installed and microphone permission is granted.
+- [x] Ensure documentation is complete.
+
+- Target platform: macOS on Apple Silicon using a native arm64 Python build.
+- Recording stack: AVFoundation through PyObjC.
+- Output format: AAC in .m4a containers.
+- Recording model: interactive device selection, 60-minute rolling segments, graceful stop on Ctrl-C.
+- Validation: compileall passed and a VS Code build task was created in .vscode/tasks.json.

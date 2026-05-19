@@ -1,0 +1,43 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Compile recorder sources",
+			"type": "shell",
+			"command": "/Users/jorg/recorder/.venv-1/bin/python",
+			"args": [
+				"-m",
+				"compileall",
+				"src"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "List recorder devices",
+			"type": "shell",
+			"command": "/Users/jorg/recorder/.venv-1/bin/python",
+			"args": [
+				"-m",
+				"sound_recorder",
+				"--list-devices"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Quick recorder test (1 min)",
+			"type": "shell",
+			"command": "/Users/jorg/recorder/.venv-1/bin/python",
+			"args": [
+				"-m",
+				"sound_recorder",
+				"--segment-minutes",
+				"1"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		}
+	]
+}

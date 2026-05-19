@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sound-recorder"
+version = "0.1.0"
+description = "Native macOS Apple Silicon CLI audio recorder with rolling 60-minute segments"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "pyobjc-framework-AVFoundation>=10.3",
+]
+
+[project.scripts]
+sound-recorder = "sound_recorder.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sound_recorder"]
