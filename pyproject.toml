@@ -12,8 +12,14 @@ dependencies = [
   "pyobjc-framework-AVFoundation>=11.1,<12.1",
 ]
 
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+
 [project.scripts]
 sound-recorder = "sound_recorder.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/sound_recorder"]
