@@ -188,6 +188,40 @@ Expected output:
 arm64
 ```
 
+If you see `x86_64` instead, the recorder now exits immediately with a clear runtime error instead of continuing into an unsupported AVFoundation setup. In that case, rebuild the environment with a native Apple Silicon Python, for example:
+
+```bash
+PYTHON_BIN=/opt/homebrew/bin/python3.11 ./scripts/bootstrap_m1.sh
+```
+
+## Apple Silicon Runtime Guard
+
+The Python entry point now enforces the same platform assumptions as the shell scripts:
+
+- macOS is required
+- Python must run natively as `arm64`
+- AVFoundation must be importable through the installed PyObjC packages
+
+This means direct launches such as `python -m sound_recorder` fail fast with a clear message on unsupported environments instead of breaking later during framework import or recorder startup.
+
+## M1 Smoke Test
+
+Use this exact sequence on the target MacBook Pro M1 to validate the full runtime path:
+
+```bash
+chmod +x scripts/bootstrap_m1.sh scripts/post_install_check.sh scripts/run_recorder.sh
+./scripts/bootstrap_m1.sh
+./scripts/post_install_check.sh
+./scripts/run_recorder.sh --segment-minutes 1
+```
+
+What to verify during this test:
+
+- `post_install_check.sh` reports `Python architecture: arm64`
+- `--list-devices` works during post-install verification
+- the recorder starts, shows device selection, completes arming, and enters the live dashboard
+- stopping the run finalizes a `.m4a` segment cleanly
+
 ## Usage
 
 List devices only:

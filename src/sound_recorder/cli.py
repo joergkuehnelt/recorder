@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import argparse
+import platform
+import sys
 from pathlib import Path
-from typing import List
+from typing import TYPE_CHECKING, List
 
-from sound_recorder.devices import InputDevice, list_input_devices
 from sound_recorder.playlist import (
     build_amber_box_lines,
     build_green_status_line,
     maybe_start_playlist_companion,
 )
-from sound_recorder.recorder import build_recorder
+
+if TYPE_CHECKING:
+    from sound_recorder.devices import InputDevice
 
 
 ANSI_RESET = "\033[0m"
@@ -95,6 +98,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    _ensure_supported_runtime()
+
+    from sound_recorder.devices import list_input_devices
+    from sound_recorder.recorder import build_recorder
+
     args = build_parser().parse_args()
     if args.warning_peak_dbfs <= args.target_peak_dbfs:
         raise SystemExit("--warning-peak-dbfs must be higher than --target-peak-dbfs.")
@@ -224,3 +232,21 @@ def _print_tagged_line(label: str, message: str, color: str) -> None:
 
 def _style(text: str, style_code: str) -> str:
     return f"{style_code}{text}{ANSI_RESET}"
+
+
+def _ensure_supported_runtime() -> None:
+    if sys.platform != "darwin":
+        raise SystemExit("sound-recorder requires macOS.")
+
+    machine = platform.machine()
+    if machine != "arm64":
+        raise SystemExit(
+            f"sound-recorder requires native arm64 Python on Apple Silicon, got {machine}."
+        )
+
+    try:
+        import AVFoundation  # noqa: F401
+    except ImportError as exc:
+        raise SystemExit(
+            "AVFoundation is unavailable. Use the project bootstrap on macOS with PyObjC installed."
+        ) from exc

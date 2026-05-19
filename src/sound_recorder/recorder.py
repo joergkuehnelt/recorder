@@ -164,7 +164,9 @@ class ChunkedAudioRecorder(NSObject):
         self.last_state_source_path: Optional[str] = None
         self.segment_track_events: List[SegmentTrackEvent] = []
         self.meter_header_rendered = False
-        self.status_line_widths: List[int] = []
+        self.status_line_count = 0
+        self.cached_terminal_width = 0
+        self.last_terminal_width_check_at = 0.0
         self.use_color_output = sys.stdout.isatty()
         self.command_input_enabled = sys.stdin.isatty()
         self.stdin_fd: Optional[int] = None
@@ -465,8 +467,15 @@ class ChunkedAudioRecorder(NSObject):
             del signum, frame
             self.request_stop()
 
+        def _handle_resize(signum, frame):
+            del signum, frame
+            self.cached_terminal_width = 0
+            self.last_terminal_width_check_at = 0.0
+
         signal.signal(signal.SIGINT, _handle_stop)
         signal.signal(signal.SIGTERM, _handle_stop)
+        if hasattr(signal, "SIGWINCH"):
+            signal.signal(signal.SIGWINCH, _handle_resize)
 
     @staticmethod
     def _describe_error(error, fallback: str) -> str:
@@ -675,42 +684,36 @@ class ChunkedAudioRecorder(NSObject):
         return True
 
     def _render_status_block(self, lines: List[str]) -> None:
-        fitted_lines = [self._fit_status_message(line) for line in lines]
-        previous_widths = self.status_line_widths[:]
-        width_count = max(len(previous_widths), len(fitted_lines))
-        new_widths: List[int] = []
+        rendered_lines = [self._fit_status_message(line) for line in lines]
+        previous_line_count = self.status_line_count
+        line_count = len(rendered_lines)
+        total_rows = max(previous_line_count, line_count)
 
+        for index in range(total_rows):
+            if index > 0:
+                print("\033[1B\r", end="")
+            print("\033[2K", end="")
+            if index < line_count:
+                print(rendered_lines[index], end="")
+
+        if total_rows > 1:
+            print(f"\033[{total_rows - 1}A", end="")
         print("\r", end="", flush=True)
-        for index in range(width_count):
-            line = fitted_lines[index] if index < len(fitted_lines) else ""
-            visible_length = len(self._strip_ansi(line))
-            previous_width = previous_widths[index] if index < len(previous_widths) else 0
-            padded_line = line + " " * max(0, previous_width - visible_length)
-            print(padded_line, end="", flush=True)
-            new_widths.append(max(previous_width, visible_length))
-            if index < width_count - 1:
-                print("\n", end="", flush=True)
 
-        move_up = max(0, width_count - 1)
-        if move_up:
-            print(f"\033[{move_up}A", end="", flush=True)
-
-        self.status_line_widths = new_widths[: len(fitted_lines)]
+        self.status_line_count = line_count
 
     def _clear_status_line(self) -> None:
-        if not self.status_line_widths:
+        if self.status_line_count == 0:
             return
 
-        line_count = len(self.status_line_widths)
+        for index in range(self.status_line_count):
+            if index > 0:
+                print("\033[1B\r", end="")
+            print("\033[2K", end="")
+        if self.status_line_count > 1:
+            print(f"\033[{self.status_line_count - 1}A", end="")
         print("\r", end="", flush=True)
-        for index, width in enumerate(self.status_line_widths):
-            print(" " * width, end="", flush=True)
-            if index < line_count - 1:
-                print("\n", end="", flush=True)
-        if line_count > 1:
-            print(f"\033[{line_count - 1}A", end="", flush=True)
-        print("\r", end="", flush=True)
-        self.status_line_widths = []
+        self.status_line_count = 0
 
     def _log_line(self, message: str) -> None:
         self._clear_status_line()
@@ -740,7 +743,7 @@ class ChunkedAudioRecorder(NSObject):
         return [border, content, border]
 
     def _build_info_table(self, rows: List[tuple[str, str]]) -> List[str]:
-        terminal_width = max(48, shutil.get_terminal_size((160, 24)).columns - 1)
+        terminal_width = self._get_terminal_width(minimum=48)
         max_table_width = min(terminal_width, 88)
         key_width = max(4, min(8, max(len(label) for label, _ in rows)))
         value_width = max(16, max_table_width - key_width - 7)
@@ -1026,35 +1029,22 @@ class ChunkedAudioRecorder(NSObject):
         return text.replace('"', "'")
 
     def _fit_status_message(self, message: str) -> str:
-        terminal_width = max(20, shutil.get_terminal_size((160, 24)).columns - 1)
+        terminal_width = self._get_terminal_width()
         visible_message = self._strip_ansi(message)
         if len(visible_message) <= terminal_width:
             return message
 
-        suffix = self._current_last_state_text()
-        state_label = self._ansi_style(suffix, ANSI_GREEN, bold=True)
-        if state_label in message:
-            prefix_part, _, _ = message.partition(state_label)
-            visible_state = self._strip_ansi(state_label)
-            prefix_limit = max(0, terminal_width - len(visible_state) - 2)
-            if prefix_limit > 0:
-                truncated_prefix = self._truncate_plain_text(
-                    self._strip_ansi(prefix_part).rstrip(),
-                    prefix_limit,
-                )
-                candidate = f"{truncated_prefix}  {state_label}" if truncated_prefix else state_label
-                if len(self._strip_ansi(candidate)) <= terminal_width:
-                    return candidate
-
-            if len(visible_state) > terminal_width:
-                return self._ansi_style(
-                    self._truncate_plain_text(visible_state, terminal_width),
-                    ANSI_GREEN,
-                    bold=True,
-                )
-            return state_label
-
         return self._truncate_plain_text(visible_message, terminal_width)
+
+    def _get_terminal_width(self, minimum: int = 20) -> int:
+        now = time.monotonic()
+        if self.cached_terminal_width <= 0 or (now - self.last_terminal_width_check_at) >= 0.5:
+            self.cached_terminal_width = max(
+                minimum,
+                shutil.get_terminal_size((160, 24)).columns - 1,
+            )
+            self.last_terminal_width_check_at = now
+        return max(minimum, self.cached_terminal_width)
 
     @staticmethod
     def _truncate_plain_text(text: str, limit: int) -> str:
