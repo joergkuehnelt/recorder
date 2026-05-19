@@ -398,9 +398,9 @@ class ChunkedAudioRecorder(NSObject):
         bar = self._build_colored_meter_bar(filled)
         warning = ""
         if peak_dbfs >= self.clip_peak_dbfs:
-            warning = self._style(" CLIP", ANSI_RED, bold=True)
+            warning = self._ansi_style(" CLIP", ANSI_RED, bold=True)
         elif peak_dbfs >= self.warning_peak_dbfs:
-            warning = self._style(" HOT", ANSI_YELLOW, bold=True)
+            warning = self._ansi_style(" HOT", ANSI_YELLOW, bold=True)
 
         peak_color = ANSI_GREEN
         if peak_dbfs >= self.clip_peak_dbfs:
@@ -408,9 +408,9 @@ class ChunkedAudioRecorder(NSObject):
         elif peak_dbfs >= self.warning_peak_dbfs:
             peak_color = ANSI_YELLOW
 
-        mode_label = self._style(f"{mode:>3}", ANSI_CYAN, bold=True)
-        peak_label = self._style(f"{peak_dbfs:5.1f} dBFS", peak_color, bold=True)
-        gain_label = self._style(f"{self.current_channel_volume:.2f}", ANSI_CYAN)
+        mode_label = self._ansi_style(f"{mode:>3}", ANSI_CYAN, bold=True)
+        peak_label = self._ansi_style(f"{peak_dbfs:5.1f} dBFS", peak_color, bold=True)
+        gain_label = self._ansi_style(f"{self.current_channel_volume:.2f}", ANSI_CYAN)
 
         status = (
             f"{mode_label} [{bar}] peak {peak_label} "
@@ -468,7 +468,7 @@ class ChunkedAudioRecorder(NSObject):
         print(message, flush=True)
 
     def _decorate_message(self, label: str, message: str, color: str) -> str:
-        tag = self._style(f"[{label}]", color, bold=True)
+        tag = self._ansi_style(f"[{label}]", color, bold=True)
         return f"{tag} {message}"
 
     def _build_colored_meter_bar(self, filled: int) -> str:
@@ -483,13 +483,13 @@ class ChunkedAudioRecorder(NSObject):
                     color = ANSI_RED
                 elif index >= green_limit:
                     color = ANSI_YELLOW
-                parts.append(self._style("#", color, bold=True))
+                parts.append(self._ansi_style("#", color, bold=True))
             else:
-                parts.append(self._style("-", ANSI_DIM))
+                parts.append(self._ansi_style("-", ANSI_DIM))
 
         return "".join(parts)
 
-    def _style(self, text: str, color: str, bold: bool = False) -> str:
+    def _ansi_style(self, text: str, color: str, bold: bool = False) -> str:
         if not self.use_color_output:
             return text
 
