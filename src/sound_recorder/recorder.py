@@ -163,7 +163,7 @@ class ChunkedAudioRecorder(NSObject):
         self.last_state_source_path: Optional[str] = None
         self.segment_track_events: List[SegmentTrackEvent] = []
         self.meter_header_rendered = False
-        self.status_line_width = 0
+        self.status_line_widths: List[int] = []
         self.use_color_output = sys.stdout.isatty()
         self.command_input_enabled = sys.stdin.isatty()
         self.stdin_fd: Optional[int] = None
@@ -622,7 +622,6 @@ class ChunkedAudioRecorder(NSObject):
         hold_label = self._ansi_style(f"hold {hold_dbfs:5.1f}", ANSI_DIM)
         gain_label = self._ansi_style(f"{self.current_channel_volume:.2f}", ANSI_CYAN)
         elapsed_label = self._ansi_style(self._format_current_segment_elapsed(), ANSI_ORANGE, bold=True)
-        state_label = self._ansi_style(self._current_last_state_text(), ANSI_GREEN, bold=True)
 
         self._render_meter_header_once(mode)
         status = (
@@ -632,8 +631,14 @@ class ChunkedAudioRecorder(NSObject):
             f"{self._ansi_style('[R] restart', ANSI_CYAN)}"
         )
         if mode == "REC":
-            status = f"{status}  {state_label}"
-        self._render_status_line(status)
+            state_line = self._ansi_style(
+                f"[NOW] {self._current_last_state_text()}",
+                ANSI_GREEN,
+                bold=True,
+            )
+            self._render_status_block([status, state_line])
+        else:
+            self._render_status_block([status])
         self.last_meter_render_at = now
         return peak_dbfs
 
@@ -667,19 +672,43 @@ class ChunkedAudioRecorder(NSObject):
         self.current_channel_volume = clamped_volume
         return True
 
-    def _render_status_line(self, message: str) -> None:
-        message = self._fit_status_message(message)
-        visible_length = len(self._strip_ansi(message))
-        padded_message = message + " " * max(0, self.status_line_width - visible_length)
-        self.status_line_width = max(self.status_line_width, visible_length)
-        print(f"\r{padded_message}", end="", flush=True)
+    def _render_status_block(self, lines: List[str]) -> None:
+        fitted_lines = [self._fit_status_message(line) for line in lines]
+        previous_widths = self.status_line_widths[:]
+        width_count = max(len(previous_widths), len(fitted_lines))
+        new_widths: List[int] = []
+
+        print("\r", end="", flush=True)
+        for index in range(width_count):
+            line = fitted_lines[index] if index < len(fitted_lines) else ""
+            visible_length = len(self._strip_ansi(line))
+            previous_width = previous_widths[index] if index < len(previous_widths) else 0
+            padded_line = line + " " * max(0, previous_width - visible_length)
+            print(padded_line, end="", flush=True)
+            new_widths.append(max(previous_width, visible_length))
+            if index < width_count - 1:
+                print("\n", end="", flush=True)
+
+        move_up = max(0, width_count - 1)
+        if move_up:
+            print(f"\033[{move_up}A", end="", flush=True)
+
+        self.status_line_widths = new_widths[: len(fitted_lines)]
 
     def _clear_status_line(self) -> None:
-        if self.status_line_width == 0:
+        if not self.status_line_widths:
             return
 
-        print(f"\r{' ' * self.status_line_width}\r", end="", flush=True)
-        self.status_line_width = 0
+        line_count = len(self.status_line_widths)
+        print("\r", end="", flush=True)
+        for index, width in enumerate(self.status_line_widths):
+            print(" " * width, end="", flush=True)
+            if index < line_count - 1:
+                print("\n", end="", flush=True)
+        if line_count > 1:
+            print(f"\033[{line_count - 1}A", end="", flush=True)
+        print("\r", end="", flush=True)
+        self.status_line_widths = []
 
     def _log_line(self, message: str) -> None:
         self._clear_status_line()
@@ -956,22 +985,43 @@ class ChunkedAudioRecorder(NSObject):
         return text.replace('"', "'")
 
     def _fit_status_message(self, message: str) -> str:
-        terminal_width = shutil.get_terminal_size((160, 24)).columns
+        terminal_width = max(20, shutil.get_terminal_size((160, 24)).columns - 1)
         visible_message = self._strip_ansi(message)
-        if len(visible_message) <= terminal_width - 1:
+        if len(visible_message) <= terminal_width:
             return message
 
         suffix = self._current_last_state_text()
         state_label = self._ansi_style(suffix, ANSI_GREEN, bold=True)
-        prefix_text = visible_message[: max(20, terminal_width - len(suffix) - 8)].rstrip()
-        truncated_prefix = prefix_text
-        if len(visible_message) > len(prefix_text):
-            truncated_prefix = prefix_text[:-3].rstrip() + "..." if len(prefix_text) > 3 else prefix_text
-
         if state_label in message:
             prefix_part, _, _ = message.partition(state_label)
-            return f"{prefix_part.rstrip()}...  {state_label}"
-        return truncated_prefix
+            visible_state = self._strip_ansi(state_label)
+            prefix_limit = max(0, terminal_width - len(visible_state) - 2)
+            if prefix_limit > 0:
+                truncated_prefix = self._truncate_plain_text(
+                    self._strip_ansi(prefix_part).rstrip(),
+                    prefix_limit,
+                )
+                candidate = f"{truncated_prefix}  {state_label}" if truncated_prefix else state_label
+                if len(self._strip_ansi(candidate)) <= terminal_width:
+                    return candidate
+
+            if len(visible_state) > terminal_width:
+                return self._ansi_style(
+                    self._truncate_plain_text(visible_state, terminal_width),
+                    ANSI_GREEN,
+                    bold=True,
+                )
+            return state_label
+
+        return self._truncate_plain_text(visible_message, terminal_width)
+
+    @staticmethod
+    def _truncate_plain_text(text: str, limit: int) -> str:
+        if len(text) <= limit:
+            return text
+        if limit <= 3:
+            return text[:limit]
+        return text[: limit - 3].rstrip() + "..."
 
     def _decorate_message(self, label: str, message: str, color: str) -> str:
         tag = self._ansi_style(f"[{label}]", color, bold=True)
