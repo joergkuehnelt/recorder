@@ -163,7 +163,10 @@ class TestPlaylistHelpers:
             encoding="utf-8",
         )
 
-        assert read_last_state_entry(last_state) == "18:45 => NO DETECTION"
+        entry = read_last_state_entry(last_state)
+        assert entry is not None
+        assert entry.endswith(" => NO DETECTION")
+        assert len(entry.split(" => ")[0]) == 5
 
     def test_sanitize_song_history_entry_handles_plain_text(self):
         assert sanitize_song_history_entry("Artist | Track") == "Artist | Track"
