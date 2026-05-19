@@ -5,6 +5,7 @@ import math
 import os
 import re
 import signal
+import sys
 import subprocess
 import time
 from dataclasses import dataclass
@@ -38,6 +39,15 @@ WARNING_GAIN_COOLDOWN_SECONDS = 2.0
 MIN_CHANNEL_VOLUME = 0.10
 MAX_CHANNEL_VOLUME = 1.00
 METER_BAR_WIDTH = 24
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
+ANSI_RESET = "\033[0m"
+ANSI_BOLD = "\033[1m"
+ANSI_DIM = "\033[2m"
+ANSI_CYAN = "\033[36m"
+ANSI_GREEN = "\033[32m"
+ANSI_YELLOW = "\033[33m"
+ANSI_RED = "\033[31m"
+ANSI_MAGENTA = "\033[35m"
 
 
 def _format_output_name(started_at: datetime, ended_at: datetime) -> str:
@@ -102,6 +112,7 @@ class ChunkedAudioRecorder(NSObject):
         self.last_meter_render_at = 0.0
         self.last_warning_adjustment_at = 0.0
         self.status_line_width = 0
+        self.use_color_output = sys.stdout.isatty()
         return self
 
     def configure(self) -> None:
@@ -160,9 +171,13 @@ class ChunkedAudioRecorder(NSObject):
 
             finished_cleanly = self._wait_for_recording_stop(run_loop, timeout_seconds=10.0)
             if not finished_cleanly and self.active_segment is not None:
-                print(
-                    "Recorder stopped before the current segment finished saving. "
-                    "The partial file will be recovered on the next start."
+                self._log_line(
+                    self._decorate_message(
+                        "WARN",
+                        "Recorder stopped before the current segment finished saving. "
+                        "The partial file will be recovered on the next start.",
+                        ANSI_YELLOW,
+                    )
                 )
 
             if self.session.isRunning():
@@ -270,7 +285,11 @@ class ChunkedAudioRecorder(NSObject):
 
         if not self.audio_channels:
             self._log_line(
-                "Live peak meter unavailable for this device. Recording continues without metering."
+                self._decorate_message(
+                    "INFO",
+                    "Live peak meter unavailable for this device. Recording continues without metering.",
+                    ANSI_YELLOW,
+                )
             )
             return
 
@@ -281,8 +300,12 @@ class ChunkedAudioRecorder(NSObject):
             return
 
         self._log_line(
-            "Arming input for "
-            f"{self.arming_duration_seconds:.1f} seconds. Make the loudest sound you expect to record now."
+            self._decorate_message(
+                "ARM",
+                "Arming input for "
+                f"{self.arming_duration_seconds:.1f} seconds. Make the loudest sound you expect to record now.",
+                ANSI_CYAN,
+            )
         )
         deadline = time.monotonic() + self.arming_duration_seconds
         highest_peak_dbfs = METER_FLOOR_DBFS
@@ -300,13 +323,21 @@ class ChunkedAudioRecorder(NSObject):
         adjusted = self._apply_safe_fixed_gain(highest_peak_dbfs)
         if adjusted:
             self._log_line(
-                f"Arming complete. Peak {highest_peak_dbfs:.1f} dBFS. "
-                f"Fixed gain set to {self.current_channel_volume:.2f}."
+                self._decorate_message(
+                    "OK",
+                    f"Arming complete. Peak {highest_peak_dbfs:.1f} dBFS. "
+                    f"Fixed gain set to {self.current_channel_volume:.2f}.",
+                    ANSI_GREEN,
+                )
             )
         else:
             self._log_line(
-                f"Arming complete. Peak {highest_peak_dbfs:.1f} dBFS. "
-                f"Keeping fixed gain at {self.current_channel_volume:.2f}."
+                self._decorate_message(
+                    "OK",
+                    f"Arming complete. Peak {highest_peak_dbfs:.1f} dBFS. "
+                    f"Keeping fixed gain at {self.current_channel_volume:.2f}.",
+                    ANSI_GREEN,
+                )
             )
 
     def _apply_safe_fixed_gain(self, peak_dbfs: float) -> bool:
@@ -335,13 +366,21 @@ class ChunkedAudioRecorder(NSObject):
         )
         if adjusted:
             self._log_line(
-                f"{warning_text}: {peak_dbfs:.1f} dBFS. "
-                f"Reducing fixed gain to {self.current_channel_volume:.2f}."
+                self._decorate_message(
+                    "WARN",
+                    f"{warning_text}: {peak_dbfs:.1f} dBFS. "
+                    f"Reducing fixed gain to {self.current_channel_volume:.2f}.",
+                    ANSI_YELLOW if warning_text == "Peak warning" else ANSI_RED,
+                )
             )
         else:
             self._log_line(
-                f"{warning_text}: {peak_dbfs:.1f} dBFS. "
-                "Gain is already at the minimum safe setting."
+                self._decorate_message(
+                    "WARN",
+                    f"{warning_text}: {peak_dbfs:.1f} dBFS. "
+                    "Gain is already at the minimum safe setting.",
+                    ANSI_YELLOW if warning_text == "Peak warning" else ANSI_RED,
+                )
             )
 
     def _render_live_meter(self, mode: str) -> Optional[float]:
@@ -356,16 +395,26 @@ class ChunkedAudioRecorder(NSObject):
         clamped_peak = max(METER_FLOOR_DBFS, min(0.0, peak_dbfs))
         normalized = 1.0 - (abs(clamped_peak) / abs(METER_FLOOR_DBFS))
         filled = max(0, min(METER_BAR_WIDTH, int(round(normalized * METER_BAR_WIDTH))))
-        bar = "#" * filled + "-" * (METER_BAR_WIDTH - filled)
+        bar = self._build_colored_meter_bar(filled)
         warning = ""
         if peak_dbfs >= self.clip_peak_dbfs:
-            warning = " CLIP"
+            warning = self._style(" CLIP", ANSI_RED, bold=True)
         elif peak_dbfs >= self.warning_peak_dbfs:
-            warning = " HOT"
+            warning = self._style(" HOT", ANSI_YELLOW, bold=True)
+
+        peak_color = ANSI_GREEN
+        if peak_dbfs >= self.clip_peak_dbfs:
+            peak_color = ANSI_RED
+        elif peak_dbfs >= self.warning_peak_dbfs:
+            peak_color = ANSI_YELLOW
+
+        mode_label = self._style(f"{mode:>3}", ANSI_CYAN, bold=True)
+        peak_label = self._style(f"{peak_dbfs:5.1f} dBFS", peak_color, bold=True)
+        gain_label = self._style(f"{self.current_channel_volume:.2f}", ANSI_CYAN)
 
         status = (
-            f"{mode} [{bar}] peak {peak_dbfs:5.1f} dBFS "
-            f"gain {self.current_channel_volume:.2f}{warning}"
+            f"{mode_label} [{bar}] peak {peak_label} "
+            f"gain {gain_label}{warning}"
         )
         self._render_status_line(status)
         self.last_meter_render_at = now
@@ -402,8 +451,9 @@ class ChunkedAudioRecorder(NSObject):
         return True
 
     def _render_status_line(self, message: str) -> None:
-        padded_message = message.ljust(self.status_line_width)
-        self.status_line_width = max(self.status_line_width, len(message))
+        visible_length = len(self._strip_ansi(message))
+        padded_message = message + " " * max(0, self.status_line_width - visible_length)
+        self.status_line_width = max(self.status_line_width, visible_length)
         print(f"\r{padded_message}", end="", flush=True)
 
     def _clear_status_line(self) -> None:
@@ -416,6 +466,41 @@ class ChunkedAudioRecorder(NSObject):
     def _log_line(self, message: str) -> None:
         self._clear_status_line()
         print(message, flush=True)
+
+    def _decorate_message(self, label: str, message: str, color: str) -> str:
+        tag = self._style(f"[{label}]", color, bold=True)
+        return f"{tag} {message}"
+
+    def _build_colored_meter_bar(self, filled: int) -> str:
+        parts = []
+        green_limit = int(round(METER_BAR_WIDTH * 0.60))
+        yellow_limit = int(round(METER_BAR_WIDTH * 0.85))
+
+        for index in range(METER_BAR_WIDTH):
+            if index < filled:
+                color = ANSI_GREEN
+                if index >= yellow_limit:
+                    color = ANSI_RED
+                elif index >= green_limit:
+                    color = ANSI_YELLOW
+                parts.append(self._style("#", color, bold=True))
+            else:
+                parts.append(self._style("-", ANSI_DIM))
+
+        return "".join(parts)
+
+    def _style(self, text: str, color: str, bold: bool = False) -> str:
+        if not self.use_color_output:
+            return text
+
+        prefix = color
+        if bold:
+            prefix = ANSI_BOLD + color
+        return f"{prefix}{text}{ANSI_RESET}"
+
+    @staticmethod
+    def _strip_ansi(text: str) -> str:
+        return ANSI_ESCAPE_RE.sub("", text)
 
     @staticmethod
     def _db_to_gain(delta_db: float) -> float:
@@ -437,7 +522,13 @@ class ChunkedAudioRecorder(NSObject):
                 self.output_dir / _format_output_name(started_at, ended_at)
             )
             candidate.replace(recovered_path)
-            self._log_line(f"Recovered unfinished recording as {recovered_path.name}")
+            self._log_line(
+                self._decorate_message(
+                    "RECOVER",
+                    f"Recovered unfinished recording as {recovered_path.name}",
+                    ANSI_MAGENTA,
+                )
+            )
 
     def _take_over_existing_session(self) -> None:
         session_info = self._load_session_lock()
@@ -460,8 +551,12 @@ class ChunkedAudioRecorder(NSObject):
             )
 
         self._log_line(
-            f"Existing recorder session detected for PID {existing_pid}. "
-            "Requesting a clean stop before starting a new session."
+            self._decorate_message(
+                "TAKEOVER",
+                f"Existing recorder session detected for PID {existing_pid}. "
+                "Requesting a clean stop before starting a new session.",
+                ANSI_YELLOW,
+            )
         )
         os.kill(existing_pid, signal.SIGINT)
 
