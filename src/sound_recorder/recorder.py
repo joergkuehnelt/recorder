@@ -528,8 +528,8 @@ class ChunkedAudioRecorder(NSObject):
         status = (
             f"{mode_label} <{bar}> peak {peak_label} {hold_label} "
             f"gain {gain_label}{warning}  "
-            f"{self._style('[S] stop', ANSI_YELLOW)} "
-            f"{self._style('[R] restart', ANSI_CYAN)}"
+            f"{self._ansi_style('[S] stop', ANSI_YELLOW)} "
+            f"{self._ansi_style('[R] restart', ANSI_CYAN)}"
         )
         self._render_status_line(status)
         self.last_meter_render_at = now
