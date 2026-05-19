@@ -88,6 +88,8 @@ tar -xzf sound-recorder-0.1.0-macos-arm64.tar.gz
 cd sound-recorder
 chmod +x scripts/bootstrap_m1.sh
 ./scripts/bootstrap_m1.sh
+chmod +x scripts/post_install_check.sh
+./scripts/post_install_check.sh
 ```
 
 What the bootstrap script does:
@@ -155,6 +157,13 @@ On a newly deployed Mac, first verify device access with:
 ```bash
 source .venv/bin/activate
 python -m sound_recorder --list-devices
+```
+
+Or run the combined post-install verification:
+
+```bash
+chmod +x scripts/post_install_check.sh
+./scripts/post_install_check.sh
 ```
 
 Then start a short smoke test:
