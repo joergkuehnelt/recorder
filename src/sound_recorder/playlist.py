@@ -6,6 +6,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +19,15 @@ SCRIPT_SUFFIXES = {".sh", ".command", ".py"}
 PLAYLIST_KEYWORDS = ("playlist", "play-list", "play_list")
 SONG_HISTORY_TOKEN = "song_history"
 LAST_STATE_NAME = "last_state.json"
+DEFAULT_SCAN_MAX_DEPTH = 4
+DEFAULT_SCAN_MAX_FILES = 4000
+IGNORED_DIRECTORY_NAMES = {
+    ".git",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+    ".Trash",
+}
 URL_RE = re.compile(r"\s*(?:\||-)?\s*https?://\S+")
 
 
@@ -29,6 +39,8 @@ class PlaylistLaunchResult:
     last_entry: Optional[str] = None
     last_state_path: Optional[Path] = None
     last_state_entry: Optional[str] = None
+    status_message: Optional[str] = None
+    status_kind: str = "info"
 
 
 def maybe_start_playlist_companion(
@@ -37,9 +49,25 @@ def maybe_start_playlist_companion(
     documents_dir: Optional[Path] = None,
     state_path: Path = LOCAL_STATE_PATH,
 ) -> PlaylistLaunchResult:
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        return PlaylistLaunchResult(
+            started=False,
+            status_message="Playlist helper skipped in non-interactive mode.",
+            status_kind="skip",
+        )
+
     documents_root = (documents_dir or (Path.home() / "Documents")).expanduser().resolve()
     state = _load_local_state(state_path)
     remembered_script = _resolve_saved_path(state.get("playlist_script_path"))
+    if remembered_script is None:
+        if not _should_scan_for_playlist_script(input_func=input_func, print_func=print_func):
+            return PlaylistLaunchResult(
+                started=False,
+                status_message="Playlist helper skipped. Recording continues immediately.",
+                status_kind="skip",
+            )
+        print_func("Scanning Documents for playlist scripts...")
+
     candidates = discover_playlist_script_candidates(documents_root, remembered_script)
     selected_script = _choose_playlist_script(
         remembered_script=remembered_script,
@@ -48,13 +76,25 @@ def maybe_start_playlist_companion(
         print_func=print_func,
     )
     if selected_script is None:
-        return PlaylistLaunchResult(started=False)
+        return PlaylistLaunchResult(
+            started=False,
+            status_message="No playlist helper selected. Recording continues immediately.",
+            status_kind="skip",
+        )
 
     state["playlist_script_path"] = str(selected_script)
     _save_local_state(state_path, state)
 
     launch_command = build_script_launch_command(selected_script)
-    _launch_script_in_terminal(launch_command)
+    launched = _launch_script_in_terminal(launch_command)
+    if not launched:
+        print_func("Playlist helper could not be started in Terminal. Continuing without it.")
+        return PlaylistLaunchResult(
+            started=False,
+            script_path=selected_script,
+            status_message=f"Playlist helper failed to launch: {selected_script.name}",
+            status_kind="warning",
+        )
 
     song_history_path = find_song_history_log(
         documents_root=documents_root,
@@ -83,6 +123,8 @@ def maybe_start_playlist_companion(
         last_entry=last_entry,
         last_state_path=last_state_path,
         last_state_entry=last_state_entry,
+        status_message=f"Playlist helper started: {selected_script.name}",
+        status_kind="success",
     )
 
 
@@ -98,7 +140,7 @@ def discover_playlist_script_candidates(
         return candidates
 
     scored: List[tuple[int, float, str, Path]] = []
-    for path in documents_root.rglob("*"):
+    for path in _iter_document_candidates(documents_root):
         if not path.is_file():
             continue
 
@@ -158,8 +200,10 @@ def find_song_history_log(
             continue
         seen_roots.add(resolved_root)
 
-        for path in root.rglob(f"*{SONG_HISTORY_TOKEN}*"):
+        for path in _iter_document_candidates(root):
             if not path.is_file():
+                continue
+            if SONG_HISTORY_TOKEN not in path.name.lower():
                 continue
             try:
                 mtime = path.stat().st_mtime
@@ -194,8 +238,10 @@ def find_last_state_file(
             continue
         seen_roots.add(resolved_root)
 
-        for path in root.rglob(LAST_STATE_NAME):
+        for path in _iter_document_candidates(root):
             if not path.is_file():
+                continue
+            if path.name != LAST_STATE_NAME:
                 continue
             try:
                 mtime = path.stat().st_mtime
@@ -334,7 +380,7 @@ def _choose_playlist_script(
         print_func("Enter one of the listed numbers.")
 
 
-def _launch_script_in_terminal(command: str) -> None:
+def _launch_script_in_terminal(command: str) -> bool:
     applescript = (
         "on run argv\n"
         "    set commandText to item 1 of argv\n"
@@ -344,7 +390,11 @@ def _launch_script_in_terminal(command: str) -> None:
         "    end tell\n"
         "end run"
     )
-    subprocess.run(["osascript", "-e", applescript, command], check=True)
+    try:
+        subprocess.run(["osascript", "-e", applescript, command], check=True)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return True
 
 
 def _load_local_state(state_path: Path) -> Dict[str, str]:
@@ -420,3 +470,53 @@ def _format_timestamp_seconds(value: float) -> Optional[str]:
         return datetime.fromtimestamp(value).strftime("%H:%M")
     except (OverflowError, OSError, ValueError):
         return None
+
+
+def _should_scan_for_playlist_script(
+    input_func: Callable[[str], str],
+    print_func: Callable[..., None],
+) -> bool:
+    while True:
+        answer = input_func("Search Documents for a playlist helper script? [y/N] > ").strip().lower()
+        if answer in {"", "n", "no"}:
+            return False
+        if answer in {"y", "yes"}:
+            return True
+        print_func("Enter Y or N.")
+
+
+def _iter_document_candidates(root: Path):
+    yielded = 0
+    try:
+        root = root.resolve()
+    except OSError:
+        return
+
+    if not root.exists() or not root.is_dir():
+        return
+
+    for current_root, directory_names, file_names in os.walk(root, topdown=True, onerror=lambda _exc: None):
+        current_path = Path(current_root)
+        depth = _relative_depth(root, current_path)
+        directory_names[:] = [
+            name
+            for name in directory_names
+            if name not in IGNORED_DIRECTORY_NAMES and not name.startswith(".")
+        ]
+        if depth >= DEFAULT_SCAN_MAX_DEPTH:
+            directory_names[:] = []
+
+        for file_name in file_names:
+            if file_name.startswith(".") and file_name != LAST_STATE_NAME:
+                continue
+            yield current_path / file_name
+            yielded += 1
+            if yielded >= DEFAULT_SCAN_MAX_FILES:
+                return
+
+
+def _relative_depth(root: Path, current_path: Path) -> int:
+    try:
+        return len(current_path.relative_to(root).parts)
+    except ValueError:
+        return DEFAULT_SCAN_MAX_DEPTH

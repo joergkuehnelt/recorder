@@ -135,22 +135,23 @@ def main() -> int:
 def _select_device(devices: List[InputDevice]) -> InputDevice:
     _print_devices(devices)
     while True:
-        raw_value = input(f"Select device [1-{len(devices)}] > ").strip()
+        raw_value = input(_style(f"[INFO] Select device [1-{len(devices)}] > ", ANSI_BOLD + ANSI_CYAN)).strip()
         if not raw_value.isdigit():
-            print("Enter a device number from the list.")
+            _print_tagged_line("WARN", "Enter a device number from the list.", ANSI_YELLOW)
             continue
 
         selected_index = int(raw_value)
         for device in devices:
             if device.index == selected_index:
+                _print_tagged_line("OK", f"Selected input: {device.name}", ANSI_GREEN)
                 return device
 
-        print("Selected number is not in the device list.")
+        _print_tagged_line("WARN", "Selected number is not in the device list.", ANSI_YELLOW)
 
 
 def _print_devices(devices: List[InputDevice]) -> None:
     print("=" * 68)
-    print(_style(" Available Audio Input Devices", ANSI_BOLD + ANSI_CYAN))
+    _print_tagged_line("INFO", "Available audio input devices", ANSI_CYAN)
     print("=" * 68)
     for device in devices:
         details = device.model_id or "no model id"
@@ -164,14 +165,27 @@ def _print_devices(devices: List[InputDevice]) -> None:
 def _print_banner() -> None:
     print(_style(BANNER, ANSI_CYAN))
     print("=" * 68)
+    _print_tagged_line("INFO", "Native macOS Apple Silicon rolling audio recorder", ANSI_CYAN)
+    print("=" * 68)
 
 
 def _maybe_start_playlist_helper() -> None:
     try:
         result = maybe_start_playlist_companion()
     except Exception as exc:
-        print(_style(f"Playlist helper skipped: {exc}", ANSI_YELLOW))
+        print(_style(f"[SKIP] Playlist helper skipped: {exc}", ANSI_BOLD + ANSI_YELLOW))
         return
+
+    if result.status_message:
+        status_color = ANSI_CYAN
+        status_label = "[INFO]"
+        if result.status_kind in {"skip", "warning"}:
+            status_color = ANSI_YELLOW
+            status_label = "[SKIP]" if result.status_kind == "skip" else "[WARN]"
+        elif result.status_kind == "success":
+            status_color = ANSI_GREEN
+            status_label = "[OK]"
+        print(_style(f"{status_label} {result.status_message}", ANSI_BOLD + status_color))
 
     if not result.started:
         return
@@ -192,7 +206,7 @@ def _print_session_summary(
     target_peak_dbfs: float,
     warning_peak_dbfs: float,
 ) -> None:
-    print(_style("Recording session", ANSI_BOLD + ANSI_CYAN))
+    _print_tagged_line("INFO", "Recording session", ANSI_CYAN)
     print("-" * 68)
     print(f" {_style('Device', ANSI_DIM)}        : {device_name}")
     print(f" {_style('Output', ANSI_DIM)}        : {output_dir}")
@@ -202,6 +216,10 @@ def _print_session_summary(
     print(f" {_style('Warning peak', ANSI_DIM)}  : {_style(f'{warning_peak_dbfs:.1f} dBFS', ANSI_YELLOW)}")
     print(f" {_style('Stop', ANSI_DIM)}          : Ctrl-C after the current file is finalized")
     print("-" * 68)
+
+
+def _print_tagged_line(label: str, message: str, color: str) -> None:
+    print(_style(f"[{label}] {message}", ANSI_BOLD + color))
 
 
 def _style(text: str, style_code: str) -> str:
