@@ -103,7 +103,10 @@ def discover_playlist_script_candidates(
             continue
 
         lower_name = path.name.lower()
-        lower_parts = str(path).lower()
+        try:
+            lower_parts = str(path.relative_to(documents_root)).lower()
+        except ValueError:
+            lower_parts = lower_name
         if path.suffix.lower() not in SCRIPT_SUFFIXES and not os.access(path, os.X_OK):
             continue
 
