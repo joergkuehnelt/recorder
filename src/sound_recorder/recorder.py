@@ -4,10 +4,13 @@ import json
 import math
 import os
 import re
+import select
 import signal
 import sys
 import subprocess
+import termios
 import time
+import tty
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -29,7 +32,7 @@ PARTIAL_FILE_SUFFIX = ".partial.m4a"
 SESSION_LOCK_NAME = ".recording-session.json"
 PARTIAL_FILE_PATTERN = re.compile(r"^\.(\d{8})-(\d{6})\.partial\.m4a$")
 ARMING_DURATION_SECONDS = 3.0
-METER_REFRESH_SECONDS = 0.10
+METER_REFRESH_SECONDS = 0.05
 METER_FLOOR_DBFS = -60.0
 SAFE_TARGET_PEAK_DBFS = -9.0
 WARNING_PEAK_DBFS = -3.0
@@ -38,7 +41,8 @@ WARNING_GAIN_STEP_DB = -4.0
 WARNING_GAIN_COOLDOWN_SECONDS = 2.0
 MIN_CHANNEL_VOLUME = 0.10
 MAX_CHANNEL_VOLUME = 1.00
-METER_BAR_WIDTH = 24
+METER_BAR_WIDTH = 36
+PEAK_HOLD_DECAY_DB_PER_SECOND = 14.0
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 ANSI_RESET = "\033[0m"
 ANSI_BOLD = "\033[1m"
@@ -48,6 +52,18 @@ ANSI_GREEN = "\033[32m"
 ANSI_YELLOW = "\033[33m"
 ANSI_RED = "\033[31m"
 ANSI_MAGENTA = "\033[35m"
+ANSI_ORANGE = "\033[38;5;208m"
+
+LEVEL_METER_ASCII_ART = (
+    "_      _              _             _     _         _                                      _",
+    "| |    (_)            | |           | |   (_)       ( )                                    | |",
+    "| |__   _  _ __   ___ | |__    __ _ | | __ _  _ __  |/   _ __   ___   ___   ___   _ __   __| |  ___  _ __",
+    "| '_ \\ | || '_ \\ / __|| '_ \\  / _` || |/ /| || '_ \\     | '__| / _ \\ / __| / _ \\ | '__| / _` | / _ \\| '__|",
+    "| | | || || |_) |\\__ \\| | | || (_| ||   < | || | | |    | |   |  __/| (__ | (_) || |   | (_| ||  __/| |",
+    "|_| |_||_|| .__/ |___/|_| |_| \\__,_||_|\\_\\|_||_| |_|    |_|    \\___| \\___| \\___/ |_|    \\__,_| \\___||_|",
+    "          | |",
+    "          |_|",
+)
 
 
 def _format_output_name(started_at: datetime, ended_at: datetime) -> str:
@@ -104,6 +120,7 @@ class ChunkedAudioRecorder(NSObject):
         self.active_segment: Optional[ActiveSegment] = None
         self.rotation_deadline = 0.0
         self.stop_requested = False
+        self.restart_requested = False
         self.awaiting_finish = False
         self.failure_message: Optional[str] = None
         self.is_configured = False
@@ -111,8 +128,14 @@ class ChunkedAudioRecorder(NSObject):
         self.current_channel_volume = MAX_CHANNEL_VOLUME
         self.last_meter_render_at = 0.0
         self.last_warning_adjustment_at = 0.0
+        self.peak_hold_dbfs = METER_FLOOR_DBFS
+        self.last_peak_sample_at = time.monotonic()
+        self.meter_header_rendered = False
         self.status_line_width = 0
         self.use_color_output = sys.stdout.isatty()
+        self.command_input_enabled = sys.stdin.isatty()
+        self.stdin_fd: Optional[int] = None
+        self.stdin_termios_state = None
         return self
 
     def configure(self) -> None:
@@ -146,6 +169,7 @@ class ChunkedAudioRecorder(NSObject):
             self.configure()
             self.session.startRunning()
             self._install_signal_handlers()
+            self._enable_runtime_command_input()
             self._prepare_audio_monitoring(run_loop)
             self._write_session_lock()
             self._run_arming_step(run_loop)
@@ -155,7 +179,8 @@ class ChunkedAudioRecorder(NSObject):
             self._start_segment()
 
             while True:
-                run_loop.runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.10))
+                run_loop.runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.05))
+                self._poll_runtime_command()
                 peak_dbfs = self._render_live_meter("REC")
                 self._handle_peak_warning(peak_dbfs)
                 self._rotate_if_due()
@@ -183,6 +208,7 @@ class ChunkedAudioRecorder(NSObject):
             if self.session.isRunning():
                 self.session.stopRunning()
 
+            self._disable_runtime_command_input()
             self._clear_status_line()
             self._release_session_lock()
 
@@ -191,6 +217,14 @@ class ChunkedAudioRecorder(NSObject):
         if self.audio_output.isRecording() and not self.awaiting_finish:
             self.awaiting_finish = True
             self.audio_output.stopRecording()
+
+    def request_restart(self) -> None:
+        if not self.audio_output.isRecording() or self.awaiting_finish:
+            return
+
+        self.restart_requested = True
+        self.awaiting_finish = True
+        self.audio_output.stopRecording()
 
     def captureOutput_didFinishRecordingToOutputFileAtURL_fromConnections_error_(
         self,
@@ -206,6 +240,8 @@ class ChunkedAudioRecorder(NSObject):
         self.awaiting_finish = False
         ended_at = datetime.now()
         self._write_session_lock()
+        should_restart = self.restart_requested and not self.stop_requested
+        self.restart_requested = False
 
         if error is not None:
             self.failure_message = self._describe_error(error, "Recording failed")
@@ -221,7 +257,16 @@ class ChunkedAudioRecorder(NSObject):
         recorded_path.replace(final_path)
         self._log_line(f"Saved {final_path.name}")
 
-        if not self.stop_requested:
+        if should_restart:
+            self._log_line(
+                self._decorate_message(
+                    "RESTART",
+                    "Starting a new recording segment on user request.",
+                    ANSI_CYAN,
+                )
+            )
+            self._start_segment()
+        elif not self.stop_requested:
             self._start_segment()
 
     def _start_segment(self) -> None:
@@ -235,6 +280,8 @@ class ChunkedAudioRecorder(NSObject):
         self.active_segment = ActiveSegment(started_at=started_at, temp_path=temp_path)
         self.rotation_deadline = time.monotonic() + self.segment_seconds
         self.awaiting_finish = False
+        self.peak_hold_dbfs = METER_FLOOR_DBFS
+        self.last_peak_sample_at = time.monotonic()
         self._write_session_lock(temp_path)
 
         temp_url = NSURL.fileURLWithPath_(str(temp_path))
@@ -252,6 +299,67 @@ class ChunkedAudioRecorder(NSObject):
         if time.monotonic() >= self.rotation_deadline and self.audio_output.isRecording():
             self.awaiting_finish = True
             self.audio_output.stopRecording()
+
+    def _enable_runtime_command_input(self) -> None:
+        if not self.command_input_enabled:
+            return
+
+        try:
+            self.stdin_fd = sys.stdin.fileno()
+            self.stdin_termios_state = termios.tcgetattr(self.stdin_fd)
+            tty.setcbreak(self.stdin_fd)
+        except (termios.error, ValueError, OSError):
+            self.command_input_enabled = False
+            self.stdin_fd = None
+            self.stdin_termios_state = None
+
+    def _disable_runtime_command_input(self) -> None:
+        if not self.command_input_enabled or self.stdin_fd is None or self.stdin_termios_state is None:
+            return
+
+        try:
+            termios.tcsetattr(self.stdin_fd, termios.TCSADRAIN, self.stdin_termios_state)
+        except (termios.error, ValueError, OSError):
+            pass
+        finally:
+            self.stdin_fd = None
+            self.stdin_termios_state = None
+
+    def _poll_runtime_command(self) -> None:
+        if not self.command_input_enabled or self.stdin_fd is None:
+            return
+
+        try:
+            readable, _, _ = select.select([self.stdin_fd], [], [], 0)
+        except (OSError, ValueError):
+            return
+
+        if not readable:
+            return
+
+        try:
+            command = os.read(self.stdin_fd, 1).decode("utf-8", errors="ignore").lower()
+        except OSError:
+            return
+
+        if command == "s":
+            self._log_line(
+                self._decorate_message(
+                    "STOP",
+                    "Stop requested. Saving the current file before exit.",
+                    ANSI_YELLOW,
+                )
+            )
+            self.request_stop()
+        elif command == "r":
+            self._log_line(
+                self._decorate_message(
+                    "RESTART",
+                    "Restart requested. Finalizing the current file and starting a new one.",
+                    ANSI_CYAN,
+                )
+            )
+            self.request_restart()
 
     def _install_signal_handlers(self) -> None:
         def _handle_stop(signum, frame):
@@ -395,7 +503,10 @@ class ChunkedAudioRecorder(NSObject):
         clamped_peak = max(METER_FLOOR_DBFS, min(0.0, peak_dbfs))
         normalized = 1.0 - (abs(clamped_peak) / abs(METER_FLOOR_DBFS))
         filled = max(0, min(METER_BAR_WIDTH, int(round(normalized * METER_BAR_WIDTH))))
-        bar = self._build_colored_meter_bar(filled)
+        hold_dbfs = self._update_peak_hold(clamped_peak)
+        hold_normalized = 1.0 - (abs(hold_dbfs) / abs(METER_FLOOR_DBFS))
+        hold_index = max(0, min(METER_BAR_WIDTH - 1, int(round(hold_normalized * (METER_BAR_WIDTH - 1)))))
+        bar = self._build_colored_meter_bar(filled, hold_index)
         warning = ""
         if peak_dbfs >= self.clip_peak_dbfs:
             warning = self._ansi_style(" CLIP", ANSI_RED, bold=True)
@@ -410,11 +521,15 @@ class ChunkedAudioRecorder(NSObject):
 
         mode_label = self._ansi_style(f"{mode:>3}", ANSI_CYAN, bold=True)
         peak_label = self._ansi_style(f"{peak_dbfs:5.1f} dBFS", peak_color, bold=True)
+        hold_label = self._ansi_style(f"hold {hold_dbfs:5.1f}", ANSI_DIM)
         gain_label = self._ansi_style(f"{self.current_channel_volume:.2f}", ANSI_CYAN)
 
+        self._render_meter_header_once(mode)
         status = (
-            f"{mode_label} [{bar}] peak {peak_label} "
-            f"gain {gain_label}{warning}"
+            f"{mode_label} <{bar}> peak {peak_label} {hold_label} "
+            f"gain {gain_label}{warning}  "
+            f"{self._style('[S] stop', ANSI_YELLOW)} "
+            f"{self._style('[R] restart', ANSI_CYAN)}"
         )
         self._render_status_line(status)
         self.last_meter_render_at = now
@@ -467,27 +582,59 @@ class ChunkedAudioRecorder(NSObject):
         self._clear_status_line()
         print(message, flush=True)
 
+    def _render_meter_header_once(self, mode: str) -> None:
+        if mode != "REC" or self.meter_header_rendered:
+            return
+
+        for line in LEVEL_METER_ASCII_ART:
+            print(self._ansi_style(line.rstrip(), ANSI_ORANGE, bold=True), flush=True)
+
+        self.meter_header_rendered = True
+
     def _decorate_message(self, label: str, message: str, color: str) -> str:
         tag = self._ansi_style(f"[{label}]", color, bold=True)
         return f"{tag} {message}"
 
-    def _build_colored_meter_bar(self, filled: int) -> str:
+    def _build_colored_meter_bar(self, filled: int, hold_index: int) -> str:
         parts = []
         green_limit = int(round(METER_BAR_WIDTH * 0.60))
         yellow_limit = int(round(METER_BAR_WIDTH * 0.85))
 
         for index in range(METER_BAR_WIDTH):
-            if index < filled:
+            if index == hold_index:
+                marker_color = ANSI_CYAN
+                if index >= yellow_limit:
+                    marker_color = ANSI_RED
+                elif index >= green_limit:
+                    marker_color = ANSI_YELLOW
+                elif index < filled:
+                    marker_color = ANSI_GREEN
+                parts.append(self._ansi_style("|", marker_color, bold=True))
+            elif index < filled:
                 color = ANSI_GREEN
                 if index >= yellow_limit:
                     color = ANSI_RED
                 elif index >= green_limit:
                     color = ANSI_YELLOW
-                parts.append(self._ansi_style("#", color, bold=True))
+                fill_char = "="
+                if index >= yellow_limit:
+                    fill_char = "^"
+                elif index >= green_limit:
+                    fill_char = "!"
+                parts.append(self._ansi_style(fill_char, color, bold=True))
             else:
                 parts.append(self._ansi_style("-", ANSI_DIM))
 
         return "".join(parts)
+
+    def _update_peak_hold(self, current_peak_dbfs: float) -> float:
+        now = time.monotonic()
+        elapsed = max(0.0, now - self.last_peak_sample_at)
+        self.last_peak_sample_at = now
+
+        decayed_hold = self.peak_hold_dbfs - (PEAK_HOLD_DECAY_DB_PER_SECOND * elapsed)
+        self.peak_hold_dbfs = max(METER_FLOOR_DBFS, max(current_peak_dbfs, decayed_hold))
+        return self.peak_hold_dbfs
 
     def _ansi_style(self, text: str, color: str, bold: bool = False) -> str:
         if not self.use_color_output:

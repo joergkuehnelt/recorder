@@ -222,6 +222,11 @@ sound-recorder --arming-duration 4 --target-peak-dbfs -12 --warning-peak-dbfs -4
 
 Every recording run starts with device selection. Stop with `Ctrl-C`. The current segment is finalized and renamed before the process exits.
 
+While recording is running, you can also control the session directly from the terminal:
+
+- press `S` to stop recording and save the current file before exit
+- press `R` to restart recording by saving the current file and immediately starting a new segment
+
 On a newly deployed Mac, first verify device access with:
 
 ```bash
