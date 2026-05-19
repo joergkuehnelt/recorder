@@ -5,6 +5,11 @@ from pathlib import Path
 from typing import List
 
 from sound_recorder.devices import InputDevice, list_input_devices
+from sound_recorder.playlist import (
+    build_amber_box_lines,
+    build_green_status_line,
+    maybe_start_playlist_companion,
+)
 from sound_recorder.recorder import build_recorder
 
 
@@ -14,6 +19,7 @@ ANSI_DIM = "\033[2m"
 ANSI_CYAN = "\033[36m"
 ANSI_GREEN = "\033[32m"
 ANSI_YELLOW = "\033[33m"
+ANSI_AMBER = "\033[38;5;208m"
 
 
 BANNER = r"""
@@ -104,6 +110,7 @@ def main() -> int:
         return 0
 
     device = _select_device(devices)
+    _maybe_start_playlist_helper()
     recorder = build_recorder(
         device_id=device.unique_id,
         output_dir=args.output_dir,
@@ -157,8 +164,24 @@ def _print_devices(devices: List[InputDevice]) -> None:
 def _print_banner() -> None:
     print(_style(BANNER, ANSI_CYAN))
     print("=" * 68)
-    print(_style(" Native macOS Apple Silicon rolling audio recorder", ANSI_BOLD + ANSI_CYAN))
-    print("=" * 68)
+
+
+def _maybe_start_playlist_helper() -> None:
+    try:
+        result = maybe_start_playlist_companion()
+    except Exception as exc:
+        print(_style(f"Playlist helper skipped: {exc}", ANSI_YELLOW))
+        return
+
+    if not result.started:
+        return
+
+    if result.last_entry:
+        for line in build_amber_box_lines(result.last_entry):
+            print(_style(line, ANSI_BOLD + ANSI_AMBER))
+
+    if result.last_state_entry:
+        print(_style(build_green_status_line(result.last_state_entry), ANSI_BOLD + ANSI_GREEN))
 
 
 def _print_session_summary(
