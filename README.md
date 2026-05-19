@@ -85,8 +85,8 @@ Step by step:
 Example:
 
 ```bash
-git clone <your-repo-url> sound-recorder
-cd sound-recorder
+git clone https://github.com/joergkuehnelt/recorder.git recorder
+cd recorder
 chmod +x scripts/bootstrap_m1.sh scripts/post_install_check.sh
 ./scripts/bootstrap_m1.sh
 ./scripts/post_install_check.sh
@@ -123,7 +123,7 @@ On the target MacBook Pro M1:
 
 ```bash
 tar -xzf sound-recorder-0.1.0-macos-arm64.tar.gz
-cd sound-recorder
+cd recorder
 chmod +x scripts/bootstrap_m1.sh
 ./scripts/bootstrap_m1.sh
 chmod +x scripts/post_install_check.sh

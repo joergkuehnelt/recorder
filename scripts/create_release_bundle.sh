@@ -16,26 +16,34 @@ RELEASE_DIR=${RELEASE_DIR:-releases}
 ARCHIVE_BASENAME="sound-recorder-${VERSION}-macos-arm64"
 ARCHIVE_PATH="$RELEASE_DIR/${ARCHIVE_BASENAME}.tar.gz"
 CHECKSUM_PATH="$RELEASE_DIR/${ARCHIVE_BASENAME}.sha256"
+PACKAGE_DIR_NAME="recorder"
+STAGING_ROOT=$(mktemp -d)
+STAGING_DIR="$STAGING_ROOT/$PACKAGE_DIR_NAME"
+
+cleanup() {
+  rm -rf "$STAGING_ROOT"
+}
+
+trap cleanup EXIT
 
 mkdir -p "$RELEASE_DIR"
 rm -f "$ARCHIVE_PATH" "$CHECKSUM_PATH"
 
-tar \
-  --exclude='.git' \
-  --exclude='.venv' \
-  --exclude='.venv-1' \
-  --exclude='recordings' \
-  --exclude='releases' \
-  --exclude='**/__pycache__' \
-  --exclude='*.pyc' \
-  -czf "$ARCHIVE_PATH" \
+mkdir -p "$STAGING_DIR"
+cp -R \
   .gitignore \
   README.md \
   pyproject.toml \
   .github \
   .vscode \
   scripts \
-  src
+  src \
+  "$STAGING_DIR"
+
+tar \
+  -czf "$ARCHIVE_PATH" \
+  -C "$STAGING_ROOT" \
+  "$PACKAGE_DIR_NAME"
 
 shasum -a 256 "$ARCHIVE_PATH" > "$CHECKSUM_PATH"
 
@@ -47,7 +55,7 @@ Checksum file:
 
 Copy both files to the target MacBook Pro M1, then run:
   tar -xzf ${ARCHIVE_BASENAME}.tar.gz
-  cd sound-recorder
+  cd recorder
   chmod +x scripts/bootstrap_m1.sh
   ./scripts/bootstrap_m1.sh
 EOF
