@@ -72,6 +72,24 @@ chmod +x scripts/bootstrap_m1.sh
 ./scripts/bootstrap_m1.sh
 ```
 
+If you want a clean transfer bundle first, create it on the source machine with:
+
+```bash
+chmod +x scripts/create_release_bundle.sh
+./scripts/create_release_bundle.sh
+```
+
+That produces a versioned archive and SHA-256 checksum in `releases/`.
+
+On the target MacBook Pro M1:
+
+```bash
+tar -xzf sound-recorder-0.1.0-macos-arm64.tar.gz
+cd sound-recorder
+chmod +x scripts/bootstrap_m1.sh
+./scripts/bootstrap_m1.sh
+```
+
 What the bootstrap script does:
 
 - verifies macOS and Apple Silicon
