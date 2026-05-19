@@ -20,6 +20,15 @@ The recorder writes `.m4a` files with AAC audio.
 
 If you need lossless output later, the implementation can be switched to CAF without changing the chunk rotation model.
 
+## Session safety
+
+The recorder now protects against overlapping sessions and unfinished files:
+
+- It keeps a single active recorder session per output directory.
+- If a previous recorder process is still active, a new start first asks that process to stop cleanly.
+- If the app finds leftover `.partial.m4a` files from an interrupted run, it recovers and renames them before starting a new recording.
+- If macOS delays finalization during shutdown, the unfinished file is preserved and recovered on the next launch instead of being discarded.
+
 ## File naming
 
 Each finished segment is renamed after recording completes:
