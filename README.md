@@ -65,6 +65,44 @@ python -m pip install -e .
 
 ## Deployment To Another MacBook Pro M1
 
+There are two practical deployment paths:
+
+- Run directly from a Git clone if you control the target machine and want the current repository state.
+- Use the release bundle if you want to transfer one fixed snapshot without Git history.
+
+### Run From Git Clone
+
+This is the simplest option for your own MacBook Pro M1 because you can pull updates later with Git and rerun the same bootstrap flow.
+
+Step by step:
+
+1. Clone the repository on the target Mac.
+2. Move into the project directory.
+3. Run the bootstrap script to create the virtual environment and install dependencies.
+4. Run the post-install check to verify Python architecture and device discovery.
+5. Start a short smoke test before the first long recording run.
+
+Example:
+
+```bash
+git clone <your-repo-url> sound-recorder
+cd sound-recorder
+chmod +x scripts/bootstrap_m1.sh scripts/post_install_check.sh
+./scripts/bootstrap_m1.sh
+./scripts/post_install_check.sh
+python -m sound_recorder --segment-minutes 1
+```
+
+What this gives you:
+
+- the full repository remains available on the target machine
+- updates can be pulled with `git pull`
+- the same bootstrap and verification scripts can be reused after updates
+
+Use this path when the target Mac has Git access to the repository and you want the easiest maintenance story.
+
+### Run From Release Bundle
+
 Copy the project folder to the target machine, then run:
 
 ```bash
