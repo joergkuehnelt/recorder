@@ -29,6 +29,15 @@ The recorder now protects against overlapping sessions and unfinished files:
 - If the app finds leftover `.partial.m4a` files from an interrupted run, it recovers and renames them before starting a new recording.
 - If macOS delays finalization during shutdown, the unfinished file is preserved and recovered on the next launch instead of being discarded.
 
+## Level safety
+
+Every recording run now includes an arming step before the first segment starts.
+
+- The CLI always shows a live peak meter during arming and recording.
+- During arming, the recorder listens for the loudest expected signal and sets a safe fixed gain with headroom.
+- That gain then stays fixed instead of continuously riding the file level.
+- If later peaks still get too close to clipping, the recorder prints a warning and steps the gain down once, then keeps the new fixed value.
+
 ## File naming
 
 Each finished segment is renamed after recording completes:
@@ -90,6 +99,12 @@ Run a quick 1-minute test:
 
 ```bash
 sound-recorder --segment-minutes 1
+```
+
+Tune the arming time and peak thresholds:
+
+```bash
+sound-recorder --arming-duration 4 --target-peak-dbfs -12 --warning-peak-dbfs -4
 ```
 
 Every recording run starts with device selection. Stop with `Ctrl-C`. The current segment is finalized and renamed before the process exits.

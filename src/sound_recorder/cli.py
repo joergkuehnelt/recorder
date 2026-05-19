@@ -8,6 +8,20 @@ from sound_recorder.devices import InputDevice, list_input_devices
 from sound_recorder.recorder import build_recorder
 
 
+def _positive_float(value: str) -> float:
+    parsed = float(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("Value must be greater than 0.")
+    return parsed
+
+
+def _negative_dbfs(value: str) -> float:
+    parsed = float(value)
+    if parsed >= 0:
+        raise argparse.ArgumentTypeError("Value must be below 0 dBFS.")
+    return parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="sound-recorder",
@@ -30,11 +44,32 @@ def build_parser() -> argparse.ArgumentParser:
         default=60,
         help="Length of each recording segment in minutes.",
     )
+    parser.add_argument(
+        "--arming-duration",
+        type=_positive_float,
+        default=3.0,
+        help="Seconds used for pre-roll arming and level calibration.",
+    )
+    parser.add_argument(
+        "--target-peak-dbfs",
+        type=_negative_dbfs,
+        default=-9.0,
+        help="Target peak level during arming, in dBFS.",
+    )
+    parser.add_argument(
+        "--warning-peak-dbfs",
+        type=_negative_dbfs,
+        default=-3.0,
+        help="Peak warning threshold during recording, in dBFS.",
+    )
     return parser
 
 
 def main() -> int:
     args = build_parser().parse_args()
+    if args.warning_peak_dbfs <= args.target_peak_dbfs:
+        raise SystemExit("--warning-peak-dbfs must be higher than --target-peak-dbfs.")
+
     devices = list_input_devices()
 
     if not devices:
@@ -49,11 +84,17 @@ def main() -> int:
         device_id=device.unique_id,
         output_dir=args.output_dir,
         segment_minutes=args.segment_minutes,
+        arming_duration_seconds=args.arming_duration,
+        target_peak_dbfs=args.target_peak_dbfs,
+        warning_peak_dbfs=args.warning_peak_dbfs,
     )
 
     print(f"Using input device: {device.name}")
     print(f"Saving recordings to: {args.output_dir.expanduser().resolve()}")
     print(f"Segment length: {args.segment_minutes} minute(s)")
+    print(f"Arming duration: {args.arming_duration:.1f} second(s)")
+    print(f"Target peak: {args.target_peak_dbfs:.1f} dBFS")
+    print(f"Warning peak: {args.warning_peak_dbfs:.1f} dBFS")
     print("Press Ctrl-C to stop after the current file is finalized.")
     recorder.run()
     return 0

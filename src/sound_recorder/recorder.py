@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import signal
@@ -9,7 +10,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import objc
 from AVFoundation import (
@@ -26,6 +27,17 @@ from sound_recorder.devices import find_input_device
 PARTIAL_FILE_SUFFIX = ".partial.m4a"
 SESSION_LOCK_NAME = ".recording-session.json"
 PARTIAL_FILE_PATTERN = re.compile(r"^\.(\d{8})-(\d{6})\.partial\.m4a$")
+ARMING_DURATION_SECONDS = 3.0
+METER_REFRESH_SECONDS = 0.10
+METER_FLOOR_DBFS = -60.0
+SAFE_TARGET_PEAK_DBFS = -9.0
+WARNING_PEAK_DBFS = -3.0
+CLIP_PEAK_DBFS = -1.0
+WARNING_GAIN_STEP_DB = -4.0
+WARNING_GAIN_COOLDOWN_SECONDS = 2.0
+MIN_CHANNEL_VOLUME = 0.10
+MAX_CHANNEL_VOLUME = 1.00
+METER_BAR_WIDTH = 24
 
 
 def _format_output_name(started_at: datetime, ended_at: datetime) -> str:
@@ -58,6 +70,9 @@ class ChunkedAudioRecorder(NSObject):
         device_id: str,
         output_dir: str,
         segment_minutes: int,
+        arming_duration_seconds: float = ARMING_DURATION_SECONDS,
+        target_peak_dbfs: float = SAFE_TARGET_PEAK_DBFS,
+        warning_peak_dbfs: float = WARNING_PEAK_DBFS,
     ):
         self = objc.super(ChunkedAudioRecorder, self).init()
         if self is None:
@@ -68,8 +83,14 @@ class ChunkedAudioRecorder(NSObject):
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.session_lock_path = self.output_dir / SESSION_LOCK_NAME
         self.segment_seconds = max(1, segment_minutes) * 60
+        self.arming_duration_seconds = max(0.1, float(arming_duration_seconds))
+        self.target_peak_dbfs = min(-0.1, float(target_peak_dbfs))
+        self.warning_peak_dbfs = min(-0.1, float(warning_peak_dbfs))
+        self.clip_peak_dbfs = min(-0.1, self.warning_peak_dbfs + 2.0)
         self.session = AVCaptureSession.alloc().init()
         self.audio_output = AVCaptureAudioFileOutput.alloc().init()
+        self.capture_device = None
+        self.audio_channels: List[object] = []
         self.active_segment: Optional[ActiveSegment] = None
         self.rotation_deadline = 0.0
         self.stop_requested = False
@@ -77,6 +98,10 @@ class ChunkedAudioRecorder(NSObject):
         self.failure_message: Optional[str] = None
         self.is_configured = False
         self.session_lock_owned = False
+        self.current_channel_volume = MAX_CHANNEL_VOLUME
+        self.last_meter_render_at = 0.0
+        self.last_warning_adjustment_at = 0.0
+        self.status_line_width = 0
         return self
 
     def configure(self) -> None:
@@ -84,6 +109,7 @@ class ChunkedAudioRecorder(NSObject):
             return
 
         device = find_input_device(self.device_id)
+        self.capture_device = device
         device_input, error = AVCaptureDeviceInput.deviceInputWithDevice_error_(
             device,
             None,
@@ -109,11 +135,18 @@ class ChunkedAudioRecorder(NSObject):
             self.configure()
             self.session.startRunning()
             self._install_signal_handlers()
+            self._prepare_audio_monitoring(run_loop)
             self._write_session_lock()
+            self._run_arming_step(run_loop)
+            if self.stop_requested:
+                self._log_line("Recording cancelled during arming.")
+                return
             self._start_segment()
 
             while True:
-                run_loop.runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.25))
+                run_loop.runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.10))
+                peak_dbfs = self._render_live_meter("REC")
+                self._handle_peak_warning(peak_dbfs)
                 self._rotate_if_due()
 
                 if self.failure_message:
@@ -135,6 +168,7 @@ class ChunkedAudioRecorder(NSObject):
             if self.session.isRunning():
                 self.session.stopRunning()
 
+            self._clear_status_line()
             self._release_session_lock()
 
     def request_stop(self) -> None:
@@ -170,7 +204,7 @@ class ChunkedAudioRecorder(NSObject):
         final_path = self.output_dir / _format_output_name(segment.started_at, ended_at)
         final_path = self._deduplicate(final_path)
         recorded_path.replace(final_path)
-        print(f"Saved {final_path.name}")
+        self._log_line(f"Saved {final_path.name}")
 
         if not self.stop_requested:
             self._start_segment()
@@ -189,7 +223,7 @@ class ChunkedAudioRecorder(NSObject):
         self._write_session_lock(temp_path)
 
         temp_url = NSURL.fileURLWithPath_(str(temp_path))
-        print(f"Recording {temp_path.name}")
+        self._log_line(f"Recording {temp_path.name}")
         self.audio_output.startRecordingToOutputFileURL_outputFileType_recordingDelegate_(
             temp_url,
             AVFileTypeAppleM4A,
@@ -223,6 +257,170 @@ class ChunkedAudioRecorder(NSObject):
 
         return f"{fallback}: {error}"
 
+    def _prepare_audio_monitoring(self, run_loop: NSRunLoop) -> None:
+        deadline = time.monotonic() + 2.0
+
+        while time.monotonic() < deadline:
+            connections = list(self.audio_output.connections() or [])
+            if connections:
+                self.audio_channels = list(connections[0].audioChannels() or [])
+                if self.audio_channels:
+                    break
+            run_loop.runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.10))
+
+        if not self.audio_channels:
+            self._log_line(
+                "Live peak meter unavailable for this device. Recording continues without metering."
+            )
+            return
+
+        self._apply_channel_volume(MAX_CHANNEL_VOLUME)
+
+    def _run_arming_step(self, run_loop: NSRunLoop) -> None:
+        if not self.audio_channels:
+            return
+
+        self._log_line(
+            "Arming input for "
+            f"{self.arming_duration_seconds:.1f} seconds. Make the loudest sound you expect to record now."
+        )
+        deadline = time.monotonic() + self.arming_duration_seconds
+        highest_peak_dbfs = METER_FLOOR_DBFS
+
+        while time.monotonic() < deadline and not self.stop_requested:
+            run_loop.runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(METER_REFRESH_SECONDS))
+            peak_dbfs = self._render_live_meter("ARM")
+            if peak_dbfs is not None:
+                highest_peak_dbfs = max(highest_peak_dbfs, peak_dbfs)
+
+        self._clear_status_line()
+        if self.stop_requested:
+            return
+
+        adjusted = self._apply_safe_fixed_gain(highest_peak_dbfs)
+        if adjusted:
+            self._log_line(
+                f"Arming complete. Peak {highest_peak_dbfs:.1f} dBFS. "
+                f"Fixed gain set to {self.current_channel_volume:.2f}."
+            )
+        else:
+            self._log_line(
+                f"Arming complete. Peak {highest_peak_dbfs:.1f} dBFS. "
+                f"Keeping fixed gain at {self.current_channel_volume:.2f}."
+            )
+
+    def _apply_safe_fixed_gain(self, peak_dbfs: float) -> bool:
+        if peak_dbfs <= self.target_peak_dbfs:
+            return False
+
+        delta_db = self.target_peak_dbfs - peak_dbfs
+        new_volume = self.current_channel_volume * self._db_to_gain(delta_db)
+        return self._apply_channel_volume(new_volume)
+
+    def _handle_peak_warning(self, peak_dbfs: Optional[float]) -> None:
+        if peak_dbfs is None or peak_dbfs < self.warning_peak_dbfs:
+            return
+
+        now = time.monotonic()
+        if now - self.last_warning_adjustment_at < WARNING_GAIN_COOLDOWN_SECONDS:
+            return
+
+        self.last_warning_adjustment_at = now
+        warning_text = "Peak warning"
+        if peak_dbfs >= self.clip_peak_dbfs:
+            warning_text = "Clip warning"
+
+        adjusted = self._apply_channel_volume(
+            self.current_channel_volume * self._db_to_gain(WARNING_GAIN_STEP_DB)
+        )
+        if adjusted:
+            self._log_line(
+                f"{warning_text}: {peak_dbfs:.1f} dBFS. "
+                f"Reducing fixed gain to {self.current_channel_volume:.2f}."
+            )
+        else:
+            self._log_line(
+                f"{warning_text}: {peak_dbfs:.1f} dBFS. "
+                "Gain is already at the minimum safe setting."
+            )
+
+    def _render_live_meter(self, mode: str) -> Optional[float]:
+        peak_dbfs = self._read_peak_dbfs()
+        if peak_dbfs is None:
+            return None
+
+        now = time.monotonic()
+        if now - self.last_meter_render_at < METER_REFRESH_SECONDS:
+            return peak_dbfs
+
+        clamped_peak = max(METER_FLOOR_DBFS, min(0.0, peak_dbfs))
+        normalized = 1.0 - (abs(clamped_peak) / abs(METER_FLOOR_DBFS))
+        filled = max(0, min(METER_BAR_WIDTH, int(round(normalized * METER_BAR_WIDTH))))
+        bar = "#" * filled + "-" * (METER_BAR_WIDTH - filled)
+        warning = ""
+        if peak_dbfs >= self.clip_peak_dbfs:
+            warning = " CLIP"
+        elif peak_dbfs >= self.warning_peak_dbfs:
+            warning = " HOT"
+
+        status = (
+            f"{mode} [{bar}] peak {peak_dbfs:5.1f} dBFS "
+            f"gain {self.current_channel_volume:.2f}{warning}"
+        )
+        self._render_status_line(status)
+        self.last_meter_render_at = now
+        return peak_dbfs
+
+    def _read_peak_dbfs(self) -> Optional[float]:
+        if not self.audio_channels:
+            return None
+
+        peak_values = []
+        for channel in self.audio_channels:
+            peak_value = float(channel.peakHoldLevel())
+            if not math.isfinite(peak_value):
+                continue
+            peak_values.append(max(METER_FLOOR_DBFS, min(0.0, peak_value)))
+
+        if not peak_values:
+            return None
+
+        return max(peak_values)
+
+    def _apply_channel_volume(self, volume: float) -> bool:
+        if not self.audio_channels:
+            return False
+
+        clamped_volume = max(MIN_CHANNEL_VOLUME, min(MAX_CHANNEL_VOLUME, volume))
+        if abs(clamped_volume - self.current_channel_volume) < 0.01:
+            return False
+
+        for channel in self.audio_channels:
+            channel.setVolume_(clamped_volume)
+
+        self.current_channel_volume = clamped_volume
+        return True
+
+    def _render_status_line(self, message: str) -> None:
+        padded_message = message.ljust(self.status_line_width)
+        self.status_line_width = max(self.status_line_width, len(message))
+        print(f"\r{padded_message}", end="", flush=True)
+
+    def _clear_status_line(self) -> None:
+        if self.status_line_width == 0:
+            return
+
+        print(f"\r{' ' * self.status_line_width}\r", end="", flush=True)
+        self.status_line_width = 0
+
+    def _log_line(self, message: str) -> None:
+        self._clear_status_line()
+        print(message, flush=True)
+
+    @staticmethod
+    def _db_to_gain(delta_db: float) -> float:
+        return 10 ** (delta_db / 20.0)
+
     def _recover_stale_partials(self) -> None:
         for candidate in sorted(self.output_dir.iterdir()):
             if not candidate.is_file() or not candidate.name.endswith(PARTIAL_FILE_SUFFIX):
@@ -239,7 +437,7 @@ class ChunkedAudioRecorder(NSObject):
                 self.output_dir / _format_output_name(started_at, ended_at)
             )
             candidate.replace(recovered_path)
-            print(f"Recovered unfinished recording as {recovered_path.name}")
+            self._log_line(f"Recovered unfinished recording as {recovered_path.name}")
 
     def _take_over_existing_session(self) -> None:
         session_info = self._load_session_lock()
@@ -261,7 +459,7 @@ class ChunkedAudioRecorder(NSObject):
                 "Stop it manually before starting a new session."
             )
 
-        print(
+        self._log_line(
             f"Existing recorder session detected for PID {existing_pid}. "
             "Requesting a clean stop before starting a new session."
         )
@@ -362,11 +560,21 @@ class ChunkedAudioRecorder(NSObject):
             counter += 1
 
 
-def build_recorder(device_id: str, output_dir: Path, segment_minutes: int) -> ChunkedAudioRecorder:
+def build_recorder(
+    device_id: str,
+    output_dir: Path,
+    segment_minutes: int,
+    arming_duration_seconds: float = ARMING_DURATION_SECONDS,
+    target_peak_dbfs: float = SAFE_TARGET_PEAK_DBFS,
+    warning_peak_dbfs: float = WARNING_PEAK_DBFS,
+) -> ChunkedAudioRecorder:
     recorder = ChunkedAudioRecorder.alloc().initWithDeviceID_outputDir_segmentMinutes_(
         device_id,
         str(output_dir),
         segment_minutes,
+        arming_duration_seconds,
+        target_peak_dbfs,
+        warning_peak_dbfs,
     )
     if recorder is None:
         raise RuntimeError("Failed to initialize recorder")
