@@ -6,6 +6,7 @@ import os
 import re
 import select
 import signal
+import shutil
 import sys
 import subprocess
 import termios
@@ -26,13 +27,14 @@ from AVFoundation import (
 from Foundation import NSDate, NSObject, NSRunLoop, NSURL
 
 from sound_recorder.devices import find_input_device
+from sound_recorder.playlist import LOCAL_STATE_PATH, read_last_state_entry
 
 
 PARTIAL_FILE_SUFFIX = ".partial.m4a"
 SESSION_LOCK_NAME = ".recording-session.json"
 PARTIAL_FILE_PATTERN = re.compile(r"^\.(\d{8})-(\d{6})\.partial\.m4a$")
 ARMING_DURATION_SECONDS = 3.0
-METER_REFRESH_SECONDS = 0.05
+METER_REFRESH_SECONDS = 0.03
 METER_FLOOR_DBFS = -60.0
 SAFE_TARGET_PEAK_DBFS = -9.0
 WARNING_PEAK_DBFS = -3.0
@@ -43,6 +45,7 @@ MIN_CHANNEL_VOLUME = 0.10
 MAX_CHANNEL_VOLUME = 1.00
 METER_BAR_WIDTH = 36
 PEAK_HOLD_DECAY_DB_PER_SECOND = 14.0
+LAST_STATE_REFRESH_SECONDS = 1.0
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 ANSI_RESET = "\033[0m"
 ANSI_BOLD = "\033[1m"
@@ -130,6 +133,8 @@ class ChunkedAudioRecorder(NSObject):
         self.last_warning_adjustment_at = 0.0
         self.peak_hold_dbfs = METER_FLOOR_DBFS
         self.last_peak_sample_at = time.monotonic()
+        self.last_state_display = "NO DETECTION"
+        self.last_state_refresh_at = 0.0
         self.meter_header_rendered = False
         self.status_line_width = 0
         self.use_color_output = sys.stdout.isatty()
@@ -179,7 +184,7 @@ class ChunkedAudioRecorder(NSObject):
             self._start_segment()
 
             while True:
-                run_loop.runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.05))
+                run_loop.runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(METER_REFRESH_SECONDS))
                 self._poll_runtime_command()
                 peak_dbfs = self._render_live_meter("REC")
                 self._handle_peak_warning(peak_dbfs)
@@ -523,6 +528,7 @@ class ChunkedAudioRecorder(NSObject):
         peak_label = self._ansi_style(f"{peak_dbfs:5.1f} dBFS", peak_color, bold=True)
         hold_label = self._ansi_style(f"hold {hold_dbfs:5.1f}", ANSI_DIM)
         gain_label = self._ansi_style(f"{self.current_channel_volume:.2f}", ANSI_CYAN)
+        state_label = self._ansi_style(self._current_last_state_text(), ANSI_GREEN, bold=True)
 
         self._render_meter_header_once(mode)
         status = (
@@ -531,6 +537,8 @@ class ChunkedAudioRecorder(NSObject):
             f"{self._ansi_style('[S] stop', ANSI_YELLOW)} "
             f"{self._ansi_style('[R] restart', ANSI_CYAN)}"
         )
+        if mode == "REC":
+            status = f"{status}  {state_label}"
         self._render_status_line(status)
         self.last_meter_render_at = now
         return peak_dbfs
@@ -566,6 +574,7 @@ class ChunkedAudioRecorder(NSObject):
         return True
 
     def _render_status_line(self, message: str) -> None:
+        message = self._fit_status_message(message)
         visible_length = len(self._strip_ansi(message))
         padded_message = message + " " * max(0, self.status_line_width - visible_length)
         self.status_line_width = max(self.status_line_width, visible_length)
@@ -590,6 +599,50 @@ class ChunkedAudioRecorder(NSObject):
             print(self._ansi_style(line.rstrip(), ANSI_ORANGE, bold=True), flush=True)
 
         self.meter_header_rendered = True
+
+    def _current_last_state_text(self) -> str:
+        now = time.monotonic()
+        if now - self.last_state_refresh_at < LAST_STATE_REFRESH_SECONDS:
+            return self.last_state_display
+
+        self.last_state_refresh_at = now
+        self.last_state_display = self._load_last_state_display()
+        return self.last_state_display
+
+    def _load_last_state_display(self) -> str:
+        try:
+            payload = json.loads(LOCAL_STATE_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return "NO DETECTION"
+
+        if not isinstance(payload, dict):
+            return "NO DETECTION"
+
+        raw_path = payload.get("last_state_json_path")
+        if not isinstance(raw_path, str) or not raw_path:
+            return "NO DETECTION"
+
+        last_state_path = Path(raw_path).expanduser()
+        entry = read_last_state_entry(last_state_path.resolve() if last_state_path.exists() else None)
+        return entry or "NO DETECTION"
+
+    def _fit_status_message(self, message: str) -> str:
+        terminal_width = shutil.get_terminal_size((160, 24)).columns
+        visible_message = self._strip_ansi(message)
+        if len(visible_message) <= terminal_width - 1:
+            return message
+
+        suffix = self._current_last_state_text()
+        state_label = self._ansi_style(suffix, ANSI_GREEN, bold=True)
+        prefix_text = visible_message[: max(20, terminal_width - len(suffix) - 8)].rstrip()
+        truncated_prefix = prefix_text
+        if len(visible_message) > len(prefix_text):
+            truncated_prefix = prefix_text[:-3].rstrip() + "..." if len(prefix_text) > 3 else prefix_text
+
+        if state_label in message:
+            prefix_part, _, _ = message.partition(state_label)
+            return f"{prefix_part.rstrip()}...  {state_label}"
+        return truncated_prefix
 
     def _decorate_message(self, label: str, message: str, color: str) -> str:
         tag = self._ansi_style(f"[{label}]", color, bold=True)

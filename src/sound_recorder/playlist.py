@@ -295,12 +295,15 @@ def read_last_state_entry(path: Optional[Path]) -> Optional[str]:
     )
     artist = _extract_last_state_value(payload, "artist", "artist_name", "creator", "channel")
     title = _extract_last_state_value(payload, "title", "track", "song", "name")
-    if timestamp is None or artist is None or title is None:
+    if timestamp is None:
         return None
 
     formatted_time = _format_last_state_time(timestamp)
     if formatted_time is None:
         return None
+
+    if artist is None or title is None:
+        return f"{formatted_time} => NO DETECTION"
 
     return f"{formatted_time} => {str(artist).upper()} => {title}"
 

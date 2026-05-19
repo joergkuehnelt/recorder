@@ -156,6 +156,15 @@ class TestPlaylistHelpers:
         assert " => NILS FRAHM => Says" in entry
         assert len(entry.split(" => ")[0]) == 5
 
+    def test_read_last_state_entry_null_artist_and_title_show_no_detection(self, tmp_path):
+        last_state = tmp_path / "last_state.json"
+        last_state.write_text(
+            '{"timestamp": "2026-05-20T18:45:00Z", "artist": null, "title": null}',
+            encoding="utf-8",
+        )
+
+        assert read_last_state_entry(last_state) == "18:45 => NO DETECTION"
+
     def test_sanitize_song_history_entry_handles_plain_text(self):
         assert sanitize_song_history_entry("Artist | Track") == "Artist | Track"
 
