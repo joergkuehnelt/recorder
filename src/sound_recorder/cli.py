@@ -194,7 +194,7 @@ def _maybe_start_playlist_helper() -> None:
         for line in build_amber_box_lines(result.last_entry):
             print(_style(line, ANSI_BOLD + ANSI_AMBER))
 
-    if result.last_state_entry:
+    if result.last_state_entry and not result.last_state_entry.endswith("=> NO DETECTION"):
         print(_style(build_green_status_line(result.last_state_entry), ANSI_BOLD + ANSI_GREEN))
 
 

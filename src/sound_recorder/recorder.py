@@ -62,6 +62,7 @@ ANSI_YELLOW = "\033[33m"
 ANSI_RED = "\033[31m"
 ANSI_MAGENTA = "\033[35m"
 ANSI_ORANGE = "\033[38;5;208m"
+CAFFEINATE_PATH = "/usr/bin/caffeinate"
 
 LEVEL_METER_ASCII_ART = (
     "_      _              _             _     _         _                                      _",
@@ -167,6 +168,7 @@ class ChunkedAudioRecorder(NSObject):
         self.command_input_enabled = sys.stdin.isatty()
         self.stdin_fd: Optional[int] = None
         self.stdin_termios_state = None
+        self.caffeinate_process: Optional[subprocess.Popen[str]] = None
         return self
 
     def configure(self) -> None:
@@ -198,6 +200,7 @@ class ChunkedAudioRecorder(NSObject):
             self._take_over_existing_session()
             self._recover_stale_partials()
             self.configure()
+            self._start_caffeinate()
             self.session.startRunning()
             self._install_signal_handlers()
             self._enable_runtime_command_input()
@@ -242,6 +245,7 @@ class ChunkedAudioRecorder(NSObject):
             self._disable_runtime_command_input()
             self._clear_status_line()
             self._release_session_lock()
+            self._stop_caffeinate()
 
     def request_stop(self) -> None:
         self.stop_requested = True
@@ -287,7 +291,10 @@ class ChunkedAudioRecorder(NSObject):
         final_path = self._deduplicate(final_path)
         recorded_path.replace(final_path)
         self._write_segment_sidecar(final_path, segment.started_at, ended_at)
-        self._log_line(f"Saved {final_path.name}")
+        segment_length = self._format_elapsed_seconds(
+            max(0, int((ended_at - segment.started_at).total_seconds()))
+        )
+        self._log_line(f"Saved {final_path.name} ({segment_length})")
 
         if should_restart:
             self._log_line(
@@ -360,6 +367,61 @@ class ChunkedAudioRecorder(NSObject):
         finally:
             self.stdin_fd = None
             self.stdin_termios_state = None
+
+    def _start_caffeinate(self) -> None:
+        if self.caffeinate_process is not None:
+            return
+
+        if not Path(CAFFEINATE_PATH).exists():
+            self._log_line(
+                self._decorate_message(
+                    "INFO",
+                    "Keep-awake helper unavailable on this system. Recording continues without caffeinate.",
+                    ANSI_YELLOW,
+                )
+            )
+            return
+
+        try:
+            self.caffeinate_process = subprocess.Popen(
+                [CAFFEINATE_PATH, "-dimsu", "-w", str(os.getpid())],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+        except OSError:
+            self.caffeinate_process = None
+            self._log_line(
+                self._decorate_message(
+                    "WARN",
+                    "Keep-awake helper could not be started. Recording continues without caffeinate.",
+                    ANSI_YELLOW,
+                )
+            )
+            return
+
+        self._log_line(
+            self._decorate_message(
+                "INFO",
+                "Keep-awake active. Preventing sleep and screensaver during recording.",
+                ANSI_CYAN,
+            )
+        )
+
+    def _stop_caffeinate(self) -> None:
+        if self.caffeinate_process is None:
+            return
+
+        process = self.caffeinate_process
+        self.caffeinate_process = None
+        if process.poll() is not None:
+            return
+
+        process.terminate()
+        try:
+            process.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            process.kill()
 
     def _poll_runtime_command(self) -> None:
         if not self.command_input_enabled or self.stdin_fd is None:
@@ -559,11 +621,12 @@ class ChunkedAudioRecorder(NSObject):
         peak_label = self._ansi_style(f"{peak_dbfs:5.1f} dBFS", peak_color, bold=True)
         hold_label = self._ansi_style(f"hold {hold_dbfs:5.1f}", ANSI_DIM)
         gain_label = self._ansi_style(f"{self.current_channel_volume:.2f}", ANSI_CYAN)
+        elapsed_label = self._ansi_style(self._format_current_segment_elapsed(), ANSI_ORANGE, bold=True)
         state_label = self._ansi_style(self._current_last_state_text(), ANSI_GREEN, bold=True)
 
         self._render_meter_header_once(mode)
         status = (
-            f"{mode_label} <{bar}> peak {peak_label} {hold_label} "
+            f"{mode_label} <{bar}> len {elapsed_label} peak {peak_label} {hold_label} "
             f"gain {gain_label}{warning}  "
             f"{self._ansi_style('[S] stop', ANSI_YELLOW)} "
             f"{self._ansi_style('[R] restart', ANSI_CYAN)}"
@@ -641,6 +704,24 @@ class ChunkedAudioRecorder(NSObject):
         if self.active_segment is not None:
             self._capture_segment_track_event(datetime.now())
         return self.last_state_display
+
+    def _format_current_segment_elapsed(self) -> str:
+        if self.active_segment is None:
+            return "00:00"
+
+        elapsed_seconds = max(
+            0,
+            int((datetime.now() - self.active_segment.started_at).total_seconds()),
+        )
+        return self._format_elapsed_seconds(elapsed_seconds)
+
+    @staticmethod
+    def _format_elapsed_seconds(elapsed_seconds: int) -> str:
+        minutes, seconds = divmod(elapsed_seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours > 0:
+            return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        return f"{minutes:02d}:{seconds:02d}"
 
     def _load_last_state_display(self) -> str:
         try:
