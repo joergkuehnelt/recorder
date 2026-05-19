@@ -63,6 +63,29 @@ python -m pip install --upgrade pip
 python -m pip install -e .
 ```
 
+## Deployment To Another MacBook Pro M1
+
+Copy the project folder to the target machine, then run:
+
+```bash
+chmod +x scripts/bootstrap_m1.sh
+./scripts/bootstrap_m1.sh
+```
+
+What the bootstrap script does:
+
+- verifies macOS and Apple Silicon
+- verifies that Python runs natively as `arm64`
+- creates `.venv` if needed
+- installs the project and pinned AVFoundation dependency range
+- runs `compileall` as a final sanity check
+
+If you need a specific Python executable on the target machine, use:
+
+```bash
+PYTHON_BIN=/opt/homebrew/bin/python3.11 ./scripts/bootstrap_m1.sh
+```
+
 To confirm you are on a native Apple Silicon Python:
 
 ```bash
@@ -108,6 +131,19 @@ sound-recorder --arming-duration 4 --target-peak-dbfs -12 --warning-peak-dbfs -4
 ```
 
 Every recording run starts with device selection. Stop with `Ctrl-C`. The current segment is finalized and renamed before the process exits.
+
+On a newly deployed Mac, first verify device access with:
+
+```bash
+source .venv/bin/activate
+python -m sound_recorder --list-devices
+```
+
+Then start a short smoke test:
+
+```bash
+python -m sound_recorder --segment-minutes 1
+```
 
 ## VS Code Tasks
 
