@@ -56,6 +56,7 @@ ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 ANSI_RESET = "\033[0m"
 ANSI_BOLD = "\033[1m"
 ANSI_DIM = "\033[2m"
+ANSI_BLUE = "\033[34m"
 ANSI_CYAN = "\033[36m"
 ANSI_GREEN = "\033[32m"
 ANSI_YELLOW = "\033[33m"
@@ -624,21 +625,22 @@ class ChunkedAudioRecorder(NSObject):
         elapsed_label = self._ansi_style(self._format_current_segment_elapsed(), ANSI_ORANGE, bold=True)
 
         self._render_meter_header_once(mode)
-        status = (
-            f"{mode_label} <{bar}> len {elapsed_label} peak {peak_label} {hold_label} "
-            f"gain {gain_label}{warning}  "
-            f"{self._ansi_style('[S] stop', ANSI_YELLOW)} "
-            f"{self._ansi_style('[R] restart', ANSI_CYAN)}"
-        )
-        if mode == "REC":
-            state_line = self._ansi_style(
-                f"[NOW] {self._current_last_state_text()}",
-                ANSI_GREEN,
-                bold=True,
-            )
-            self._render_status_block([status, state_line])
-        else:
-            self._render_status_block([status])
+        state_text = self._current_last_state_text() if mode == "REC" else "Waiting for recording"
+        warning_text = "CLIP" if peak_dbfs >= self.clip_peak_dbfs else "HOT" if peak_dbfs >= self.warning_peak_dbfs else "-"
+        meter_text = f"{mode_label} <{bar}>"
+        table_rows = [
+            ("Mode", "REC" if mode == "REC" else "ARM"),
+            ("Len", self._format_current_segment_elapsed()),
+            ("Peak", f"{peak_dbfs:5.1f} dBFS"),
+            ("Hold", f"{hold_dbfs:5.1f} dBFS"),
+            ("Gain", f"{self.current_channel_volume:.2f}"),
+            ("Now", state_text),
+            ("Alert", warning_text),
+            ("Keys", "S stop | R restart" if mode == "REC" else "Waiting for REC"),
+        ]
+        dashboard_lines = self._build_meter_panel(meter_text)
+        dashboard_lines.extend(self._build_info_table(table_rows))
+        self._render_status_block(dashboard_lines)
         self.last_meter_render_at = now
         return peak_dbfs
 
@@ -718,10 +720,49 @@ class ChunkedAudioRecorder(NSObject):
         if mode != "REC" or self.meter_header_rendered:
             return
 
+        print("\033[2J\033[H", end="", flush=True)
         for line in LEVEL_METER_ASCII_ART:
             print(self._ansi_style(line.rstrip(), ANSI_ORANGE, bold=True), flush=True)
 
         self.meter_header_rendered = True
+
+    def _build_meter_panel(self, meter_text: str) -> List[str]:
+        meter_visible_width = len(self._strip_ansi(meter_text))
+        inner_width = max(meter_visible_width + 2, 24)
+        border = self._ansi_style(f"+{'-' * inner_width}+", ANSI_GREEN, bold=True)
+        padding = max(0, inner_width - meter_visible_width - 2)
+        content = (
+            self._ansi_style("| ", ANSI_GREEN, bold=True)
+            + meter_text
+            + " " * padding
+            + self._ansi_style(" |", ANSI_GREEN, bold=True)
+        )
+        return [border, content, border]
+
+    def _build_info_table(self, rows: List[tuple[str, str]]) -> List[str]:
+        terminal_width = max(48, shutil.get_terminal_size((160, 24)).columns - 1)
+        max_table_width = min(terminal_width, 88)
+        key_width = max(4, min(8, max(len(label) for label, _ in rows)))
+        value_width = max(16, max_table_width - key_width - 7)
+        border = self._ansi_style(
+            f"+{'-' * (key_width + 2)}+{'-' * (value_width + 2)}+",
+            ANSI_BLUE,
+            bold=True,
+        )
+
+        lines = [border]
+        for label, value in rows:
+            fitted_label = self._truncate_plain_text(label, key_width)
+            fitted_value = self._truncate_plain_text(value, value_width)
+            lines.append(
+                self._ansi_style(
+                    f"| {fitted_label:<{key_width}} | {fitted_value:<{value_width}} |",
+                    ANSI_BLUE,
+                    bold=True,
+                )
+            )
+        lines.append(border)
+        return lines
 
     def _current_last_state_text(self) -> str:
         now = time.monotonic()
