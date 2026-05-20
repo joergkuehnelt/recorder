@@ -119,10 +119,12 @@ def main() -> int:
         )
         recorder.set_dashboard(dashboard)
         dashboard.begin_recording(device.name)
-        dashboard.show_setup_status(
-            f"Device: {device.name}",
-            f"Output: {args.output_dir.expanduser().resolve()}",
-            f"Segment {args.segment_minutes} min | Arming {args.arming_duration:.1f}s | Hotkeys: s r q",
+        dashboard.log(f"Output: {args.output_dir.expanduser().resolve()}")
+        dashboard.log(
+            f"Segment {args.segment_minutes} min  "
+            f"Arming {args.arming_duration:.1f}s  "
+            f"Target {args.target_peak_dbfs:.0f} dBFS  "
+            f"Warn {args.warning_peak_dbfs:.0f} dBFS"
         )
         recorder.run()
     return 0
