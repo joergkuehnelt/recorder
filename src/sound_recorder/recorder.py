@@ -64,23 +64,6 @@ ANSI_RED = "\033[31m"
 ANSI_MAGENTA = "\033[35m"
 ANSI_ORANGE = "\033[38;5;208m"
 CAFFEINATE_PATH = "/usr/bin/caffeinate"
-ASCII_ART_TOP_PADDING = 3
-EQ_UI_BANDS = ("60 Hz", "250 Hz", "1 kHz", "4 kHz", "12 kHz")
-EQ_UI_RANGE_DB = 12
-EQ_UI_BAR_HALF_WIDTH = 8
-EQ_UI_BAND_WEIGHTS = (0.82, 0.96, 1.00, 0.88, 0.72)
-EQ_UI_BAND_PHASES = (0.0, 0.8, 1.7, 2.6, 3.4)
-
-LEVEL_METER_ASCII_ART = (
-    "_      _              _             _     _         _                                      _",
-    "| |    (_)            | |           | |   (_)       ( )                                    | |",
-    "| |__   _  _ __   ___ | |__    __ _ | | __ _  _ __  |/   _ __   ___   ___   ___   _ __   __| |  ___  _ __",
-    "| '_ \\ | || '_ \\ / __|| '_ \\  / _` || |/ /| || '_ \\     | '__| / _ \\ / __| / _ \\ | '__| / _` | / _ \\| '__|",
-    "| | | || || |_) |\\__ \\| | | || (_| ||   < | || | | |    | |   |  __/| (__ | (_) || |   | (_| ||  __/| |",
-    "|_| |_||_|| .__/ |___/|_| |_| \\__,_||_|\\_\\|_||_| |_|    |_|    \\___| \\___| \\___/ |_|    \\__,_| \\___||_|",
-    "          | |",
-    "          |_|",
-)
 
 ELAPSED_ASCII_DIGITS = {
     "0": (" ███ ", "█   █", "█   █", "█   █", " ███ "),
@@ -190,7 +173,7 @@ class ChunkedAudioRecorder(NSObject):
         self.cached_cpu_percent = "0.0%"
         self.cached_ram_percent = "0.0%"
         self.last_process_stats_refresh_at = 0.0
-        self.eq_band_levels = [0.0 for _ in EQ_UI_BANDS]
+        self.dashboard = None
         self.use_color_output = sys.stdout.isatty()
         self.command_input_enabled = sys.stdin.isatty()
         self.stdin_fd: Optional[int] = None
@@ -219,6 +202,9 @@ class ChunkedAudioRecorder(NSObject):
             raise RuntimeError("AVCaptureSession cannot add audio file output")
         self.session.addOutput_(self.audio_output)
         self.is_configured = True
+
+    def set_dashboard(self, dashboard) -> None:
+        self.dashboard = dashboard
 
     def run(self) -> None:
         run_loop = NSRunLoop.currentRunLoop()
@@ -471,7 +457,7 @@ class ChunkedAudioRecorder(NSObject):
             self.command_input_enabled = False
             return
 
-        if command == "s":
+        if command in {"s", "q"}:
             self._log_line(
                 self._decorate_message(
                     "STOP",
@@ -663,7 +649,6 @@ class ChunkedAudioRecorder(NSObject):
         state_text = self._current_last_state_text() if mode == "REC" else "Waiting for recording"
         warning_text = "CLIP" if peak_dbfs >= self.clip_peak_dbfs else "HOT" if peak_dbfs >= self.warning_peak_dbfs else "-"
         cpu_percent, ram_percent = self._current_process_stats()
-        eq_band_levels = self._update_eq_band_levels(clamped_peak)
         table_rows = [
             ("Mode", "REC" if mode == "REC" else "ARM", "default"),
             ("Len", elapsed_text, "default"),
@@ -676,20 +661,38 @@ class ChunkedAudioRecorder(NSObject):
             ("Alert", warning_text, "default"),
             ("Keys", "S stop | R restart" if mode == "REC" else "Waiting for REC", "default"),
         ]
-        dashboard_lines = self._build_meter_panel(
-            mode_label=mode_label,
-            normalized=normalized,
-            hold_normalized=hold_normalized,
-            peak_label=peak_label,
-            hold_label=hold_label,
-            gain_label=gain_label,
-            warning=warning,
-        )
-        if mode == "REC":
-            dashboard_lines.extend(self._build_elapsed_panel(elapsed_text))
-            dashboard_lines.extend(self._build_equalizer_panel(eq_band_levels))
-        dashboard_lines.extend(self._build_info_table(table_rows))
-        self._render_status_block(dashboard_lines)
+        if self.dashboard is not None:
+            del table_rows
+            self.dashboard.update_recording(
+                elapsed_text=elapsed_text,
+                peak_text=self._strip_ansi(peak_label),
+                hold_text=self._strip_ansi(hold_label),
+                gain_text=self._strip_ansi(gain_label),
+                alert_text=warning_text,
+                title_text=state_text,
+                cpu_percent=cpu_percent,
+                ram_percent=ram_percent,
+                gauge_text=self._strip_ansi(self._build_peak_gauge(normalized, hold_normalized)),
+                status_lines=[
+                    f"Mode: {'Recording' if mode == 'REC' else 'Arming'}",
+                    "Hotkeys: s stop, r restart, q stop after finalize.",
+                ],
+            )
+        else:
+            dashboard_lines = self._build_meter_panel(
+                mode_label=mode_label,
+                normalized=normalized,
+                hold_normalized=hold_normalized,
+                peak_label=peak_label,
+                hold_label=hold_label,
+                gain_label=gain_label,
+                warning=warning,
+            )
+            if mode == "REC":
+                dashboard_lines.extend(self._build_elapsed_panel(elapsed_text))
+                dashboard_lines.extend(self._build_equalizer_panel(eq_band_levels))
+            dashboard_lines.extend(self._build_info_table(table_rows))
+            self._render_status_block(dashboard_lines)
         self.last_meter_render_at = now
         return peak_dbfs
 
@@ -743,6 +746,8 @@ class ChunkedAudioRecorder(NSObject):
         self.status_line_count = line_count
 
     def _clear_status_line(self) -> None:
+        if self.dashboard is not None:
+            return
         if self.status_line_count == 0:
             return
 
@@ -756,19 +761,17 @@ class ChunkedAudioRecorder(NSObject):
         self.status_line_count = 0
 
     def _log_line(self, message: str) -> None:
+        if self.dashboard is not None:
+            self.dashboard.log(message)
+            return
         self._clear_status_line()
         print(message, flush=True)
 
     def _render_meter_header_once(self, mode: str) -> None:
+        if self.dashboard is not None:
+            return
         if mode != "REC" or self.meter_header_rendered:
             return
-
-        print("\033[2J\033[H", end="", flush=True)
-        for _ in range(ASCII_ART_TOP_PADDING):
-            print("", flush=True)
-        for line in LEVEL_METER_ASCII_ART:
-            print(self._ansi_style(line.rstrip(), ANSI_ORANGE, bold=True), flush=True)
-        print("", flush=True)
 
         self.meter_header_rendered = True
 
