@@ -56,7 +56,6 @@ ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 ANSI_RESET = "\033[0m"
 ANSI_BOLD = "\033[1m"
 ANSI_DIM = "\033[2m"
-ANSI_BLUE = "\033[34m"
 ANSI_CYAN = "\033[36m"
 ANSI_GREEN = "\033[32m"
 ANSI_YELLOW = "\033[33m"
@@ -624,10 +623,8 @@ class ChunkedAudioRecorder(NSObject):
 
         clamped_peak = max(METER_FLOOR_DBFS, min(0.0, peak_dbfs))
         normalized = 1.0 - (abs(clamped_peak) / abs(METER_FLOOR_DBFS))
-        filled = max(0, min(METER_BAR_WIDTH, int(round(normalized * METER_BAR_WIDTH))))
         hold_dbfs = self._update_peak_hold(clamped_peak)
         hold_normalized = 1.0 - (abs(hold_dbfs) / abs(METER_FLOOR_DBFS))
-        hold_index = max(0, min(METER_BAR_WIDTH - 1, int(round(hold_normalized * (METER_BAR_WIDTH - 1)))))
         warning = ""
         if peak_dbfs >= self.clip_peak_dbfs:
             warning = self._ansi_style(" CLIP", ANSI_RED, bold=True)
@@ -819,33 +816,6 @@ class ChunkedAudioRecorder(NSObject):
         if not art_lines:
             return [""]
         return art_lines + [""]
-
-    def _build_equalizer_panel(self, band_levels: List[float]) -> List[str]:
-        bar_width = (EQ_UI_BAR_HALF_WIDTH * 2) + 1
-        title = " 5-BAND EQ :: LIVE REACTIVE DISPLAY "
-        content_width = max(len(title), 10 + bar_width + 10)
-        border = self._ansi_style(f"+{'-' * (content_width + 2)}+", ANSI_ORANGE, bold=True)
-        title_line = self._ansi_style(
-            f"| {title:<{content_width}} |",
-            ANSI_ORANGE,
-            bold=True,
-        )
-
-        lines = [border, title_line, border]
-        for band_label, band_level in zip(EQ_UI_BANDS, band_levels):
-            meter = self._build_eq_band_bar(band_level)
-            band_db = -60.0 + (band_level * 60.0)
-            row_text = f" {band_label:>6}  {meter}  {band_db:5.1f} dB "
-            lines.append(
-                self._ansi_style(
-                    f"| {row_text:<{content_width}} |",
-                    ANSI_YELLOW,
-                    bold=True,
-                )
-            )
-        lines.append(border)
-        lines.append("")
-        return lines
 
     def _build_info_table(self, rows: List[tuple[str, str, str]]) -> List[str]:
         terminal_width = self._get_terminal_width(minimum=48)
@@ -1242,73 +1212,6 @@ class ChunkedAudioRecorder(NSObject):
             gauge_chars.append(self._ansi_style(".", ANSI_DIM))
 
         return "[" + "".join(gauge_chars) + "]"
-
-    def _build_colored_meter_bar(self, filled: int, hold_index: int) -> str:
-        parts = []
-        green_limit = int(round(METER_BAR_WIDTH * 0.60))
-        yellow_limit = int(round(METER_BAR_WIDTH * 0.85))
-
-        for index in range(METER_BAR_WIDTH):
-            if index == hold_index:
-                marker_color = ANSI_CYAN
-                if index >= yellow_limit:
-                    marker_color = ANSI_RED
-                elif index >= green_limit:
-                    marker_color = ANSI_YELLOW
-                elif index < filled:
-                    marker_color = ANSI_GREEN
-                parts.append(self._ansi_style("#", marker_color, bold=True))
-            elif index < filled:
-                color = ANSI_GREEN
-                if index >= yellow_limit:
-                    color = ANSI_RED
-                elif index >= green_limit:
-                    color = ANSI_YELLOW
-                fill_char = "#"
-                if index >= yellow_limit:
-                    fill_char = "X"
-                elif index >= green_limit:
-                    fill_char = "*"
-                parts.append(self._ansi_style(fill_char, color, bold=True))
-            else:
-                parts.append(self._ansi_style(".", ANSI_DIM))
-
-        return "".join(parts)
-
-    def _build_eq_band_bar(self, level: float) -> str:
-        clamped_level = max(0.0, min(1.0, level))
-        filled = int(round(clamped_level * EQ_UI_BAR_HALF_WIDTH))
-
-        left = []
-        for index in range(EQ_UI_BAR_HALF_WIDTH):
-            active = (EQ_UI_BAR_HALF_WIDTH - index) <= filled
-            left.append(self._ansi_style("#" if active else ".", ANSI_YELLOW if active else ANSI_DIM, bold=active))
-
-        center = self._ansi_style("|", ANSI_ORANGE, bold=True)
-
-        right = []
-        for index in range(EQ_UI_BAR_HALF_WIDTH):
-            active = index < filled
-            right.append(self._ansi_style("#" if active else ".", ANSI_GREEN if active else ANSI_DIM, bold=active))
-
-        return "".join(left) + center + "".join(right)
-
-    def _update_eq_band_levels(self, peak_dbfs: float) -> List[float]:
-        normalized_peak = max(0.0, min(1.0, 1.0 - (abs(peak_dbfs) / abs(METER_FLOOR_DBFS))))
-        motion_seed = time.monotonic() * 3.0
-        updated_levels: List[float] = []
-
-        for current_level, weight, phase in zip(self.eq_band_levels, EQ_UI_BAND_WEIGHTS, EQ_UI_BAND_PHASES):
-            ripple = math.sin(motion_seed + phase) * 0.10
-            target_level = max(0.0, min(1.0, (normalized_peak * weight) + (normalized_peak * ripple)))
-            if target_level >= current_level:
-                new_level = current_level + ((target_level - current_level) * 0.45)
-            else:
-                new_level = current_level - ((current_level - target_level) * 0.18)
-            updated_levels.append(max(0.0, min(1.0, new_level)))
-
-        self.eq_band_levels = updated_levels
-        return updated_levels
 
     def _render_elapsed_ascii(self, elapsed_text: str) -> List[str]:
         rows = ["" for _ in range(5)]
