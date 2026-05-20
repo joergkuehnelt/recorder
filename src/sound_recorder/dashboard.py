@@ -132,7 +132,7 @@ class RecorderDashboard:
         self.live.stop()
 
     def refresh(self) -> None:
-        self.live.update(self._render(), refresh=True)
+        self.live.update(self._render())
 
     def log(self, message: str) -> None:
         plain = re.sub(r"\x1b\[[0-9;]*m", "", message).strip()

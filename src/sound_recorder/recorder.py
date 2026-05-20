@@ -614,12 +614,34 @@ class ChunkedAudioRecorder(NSObject):
 
     def _render_live_meter(self, mode: str) -> Optional[float]:
         peak_dbfs = self._read_peak_dbfs()
-        if peak_dbfs is None:
-            return None
 
         now = time.monotonic()
         if now - self.last_meter_render_at < METER_REFRESH_SECONDS:
             return peak_dbfs
+
+        if peak_dbfs is None:
+            if self.dashboard is not None:
+                elapsed_text = self._format_current_segment_elapsed()
+                state_text = self._current_last_state_text() if mode == "REC" else "Waiting for recording"
+                cpu_percent, ram_percent = self._current_process_stats()
+                self.dashboard.update_recording(
+                    elapsed_text=elapsed_text,
+                    peak_text=f"{METER_FLOOR_DBFS:5.1f} dBFS",
+                    hold_text=f"hold {METER_FLOOR_DBFS:5.1f}",
+                    gain_text=f"{self.current_channel_volume:.2f}",
+                    alert_text="-",
+                    title_text=state_text,
+                    cpu_percent=cpu_percent,
+                    ram_percent=ram_percent,
+                    gauge_live=0.0,
+                    gauge_hold=0.0,
+                    status_lines=[
+                        f"Mode: {'Recording' if mode == 'REC' else 'Arming'} (no meter data)",
+                        "Hotkeys: s stop, r restart, q stop after finalize.",
+                    ],
+                )
+                self.last_meter_render_at = now
+            return None
 
         clamped_peak = max(METER_FLOOR_DBFS, min(0.0, peak_dbfs))
         normalized = 1.0 - (abs(clamped_peak) / abs(METER_FLOOR_DBFS))
