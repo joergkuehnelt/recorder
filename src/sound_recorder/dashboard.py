@@ -165,9 +165,11 @@ class RecorderDashboard:
         status_lines: Sequence[str],
     ) -> None:
         term_w = shutil.get_terminal_size(fallback=(80, 24)).columns
-        # Box: '+' + '-'*(term_w-2) + '+' = exactly term_w chars wide.
-        # Content between '| ' and ' |' is term_w-4 visible chars.
-        content_w = max(44, term_w - 4)
+        # Keep the box 4 chars narrower than the terminal so we never hit the
+        # right margin exactly (that triggers a "pending wrap" in many terminals
+        # and inserts a spurious blank line before each box redraw).
+        # Box: '+' + '-'*(content_w+2) + '+' = content_w+4 chars wide.
+        content_w = max(44, term_w - 6)
         bar_w = max(_BAR_WIDTH_MIN, content_w - 2)  # '[' + bar_w chars + ']'
 
         # ── Line 1: ● REC (red) + elapsed (amber) ────────────────────────────
