@@ -39,7 +39,7 @@ PARTIAL_FILE_SUFFIX = ".partial.m4a"
 SESSION_LOCK_NAME = ".recording-session.json"
 PARTIAL_FILE_PATTERN = re.compile(r"^\.(\d{8})-(\d{6})\.partial\.m4a$")
 ARMING_DURATION_SECONDS = 3.0
-METER_REFRESH_SECONDS = 0.03
+METER_REFRESH_SECONDS = 0.02
 METER_FLOOR_DBFS = -60.0
 SAFE_TARGET_PEAK_DBFS = -9.0
 WARNING_PEAK_DBFS = -3.0
@@ -48,8 +48,8 @@ WARNING_GAIN_STEP_DB = -4.0
 WARNING_GAIN_COOLDOWN_SECONDS = 2.0
 MIN_CHANNEL_VOLUME = 0.10
 MAX_CHANNEL_VOLUME = 1.00
-METER_BAR_WIDTH = 36
-PEAK_HOLD_DECAY_DB_PER_SECOND = 14.0
+METER_BAR_WIDTH = 44
+PEAK_HOLD_DECAY_DB_PER_SECOND = 18.0
 LAST_STATE_REFRESH_SECONDS = 1.0
 SONG_HISTORY_MATCH_WINDOW_SECONDS = 90.0
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -76,6 +76,20 @@ LEVEL_METER_ASCII_ART = (
     "          | |",
     "          |_|",
 )
+
+ELAPSED_ASCII_DIGITS = {
+    "0": (" ███ ", "█   █", "█   █", "█   █", " ███ "),
+    "1": ("  █  ", " ██  ", "  █  ", "  █  ", " ███ "),
+    "2": ("████ ", "    █", " ███ ", "█    ", "█████"),
+    "3": ("████ ", "    █", " ███ ", "    █", "████ "),
+    "4": ("█  █ ", "█  █ ", "█████", "   █ ", "   █ "),
+    "5": ("█████", "█    ", "████ ", "    █", "████ "),
+    "6": (" ███ ", "█    ", "████ ", "█   █", " ███ "),
+    "7": ("█████", "    █", "   █ ", "  █  ", "  █  "),
+    "8": (" ███ ", "█   █", " ███ ", "█   █", " ███ "),
+    "9": (" ███ ", "█   █", " ████", "    █", " ███ "),
+    ":": ("     ", "  █  ", "     ", "  █  ", "     "),
+}
 
 
 def _format_output_name(started_at: datetime, ended_at: datetime) -> str:
@@ -632,15 +646,14 @@ class ChunkedAudioRecorder(NSObject):
         peak_label = self._ansi_style(f"{peak_dbfs:5.1f} dBFS", peak_color, bold=True)
         hold_label = self._ansi_style(f"hold {hold_dbfs:5.1f}", ANSI_DIM)
         gain_label = self._ansi_style(f"{self.current_channel_volume:.2f}", ANSI_CYAN)
-        elapsed_label = self._ansi_style(self._format_current_segment_elapsed(), ANSI_ORANGE, bold=True)
-
         self._render_meter_header_once(mode)
+        elapsed_text = self._format_current_segment_elapsed()
         state_text = self._current_last_state_text() if mode == "REC" else "Waiting for recording"
         warning_text = "CLIP" if peak_dbfs >= self.clip_peak_dbfs else "HOT" if peak_dbfs >= self.warning_peak_dbfs else "-"
         meter_text = f"{mode_label} <{bar}>"
         table_rows = [
             ("Mode", "REC" if mode == "REC" else "ARM"),
-            ("Len", self._format_current_segment_elapsed()),
+            ("Len", elapsed_text),
             ("Peak", f"{peak_dbfs:5.1f} dBFS"),
             ("Hold", f"{hold_dbfs:5.1f} dBFS"),
             ("Gain", f"{self.current_channel_volume:.2f}"),
@@ -649,6 +662,8 @@ class ChunkedAudioRecorder(NSObject):
             ("Keys", "S stop | R restart" if mode == "REC" else "Waiting for REC"),
         ]
         dashboard_lines = self._build_meter_panel(meter_text)
+        if mode == "REC":
+            dashboard_lines.extend(self._build_elapsed_panel(elapsed_text))
         dashboard_lines.extend(self._build_info_table(table_rows))
         self._render_status_block(dashboard_lines)
         self.last_meter_render_at = now
@@ -746,6 +761,12 @@ class ChunkedAudioRecorder(NSObject):
         )
         return [border, content, border, ""]
 
+    def _build_elapsed_panel(self, elapsed_text: str) -> List[str]:
+        art_lines = self._render_elapsed_ascii(elapsed_text)
+        if not art_lines:
+            return [""]
+        return art_lines + [""]
+
     def _build_info_table(self, rows: List[tuple[str, str]]) -> List[str]:
         terminal_width = self._get_terminal_width(minimum=48)
         max_table_width = min(terminal_width, 88)
@@ -762,7 +783,7 @@ class ChunkedAudioRecorder(NSObject):
             fitted_label = self._truncate_plain_text(label, key_width)
             fitted_value = self._truncate_plain_text(value, value_width)
             label_cell = self._ansi_style(f" {fitted_label:<{key_width}} ", ANSI_YELLOW, bold=True)
-            value_cell = self._ansi_style(f" {fitted_value:<{value_width}} ", ANSI_ORANGE, bold=True)
+            value_cell = self._ansi_style(f" {fitted_value:<{value_width}} ", ANSI_RESET + ANSI_ORANGE, bold=True)
             lines.append(
                 f"{self._ansi_style('|', ANSI_ORANGE, bold=True)}"
                 f"{label_cell}"
@@ -1078,23 +1099,33 @@ class ChunkedAudioRecorder(NSObject):
                     marker_color = ANSI_YELLOW
                 elif index < filled:
                     marker_color = ANSI_GREEN
-                parts.append(self._ansi_style("|", marker_color, bold=True))
+                parts.append(self._ansi_style("#", marker_color, bold=True))
             elif index < filled:
                 color = ANSI_GREEN
                 if index >= yellow_limit:
                     color = ANSI_RED
                 elif index >= green_limit:
                     color = ANSI_YELLOW
-                fill_char = "="
+                fill_char = "#"
                 if index >= yellow_limit:
-                    fill_char = "^"
+                    fill_char = "X"
                 elif index >= green_limit:
-                    fill_char = "!"
+                    fill_char = "*"
                 parts.append(self._ansi_style(fill_char, color, bold=True))
             else:
-                parts.append(self._ansi_style("-", ANSI_DIM))
+                parts.append(self._ansi_style(".", ANSI_DIM))
 
         return "".join(parts)
+
+    def _render_elapsed_ascii(self, elapsed_text: str) -> List[str]:
+        rows = ["" for _ in range(5)]
+        for character in elapsed_text:
+            glyph = ELAPSED_ASCII_DIGITS.get(character)
+            if glyph is None:
+                continue
+            for index, segment in enumerate(glyph):
+                rows[index] += segment + "  "
+        return [self._ansi_style(row.rstrip(), ANSI_YELLOW, bold=True) for row in rows if row.strip()]
 
     def _update_peak_hold(self, current_peak_dbfs: float) -> float:
         now = time.monotonic()
