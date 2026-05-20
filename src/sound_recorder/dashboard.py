@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import select
 import shutil
 import sys
@@ -13,6 +14,15 @@ METER_FLOOR_DBFS = -60.0
 # _BAR_WIDTH is computed dynamically; this is the minimum.
 _BAR_WIDTH_MIN = 8
 _DEVICE_BAR_WIDTH = 16
+
+_BOX_LINES = 6  # top border + 4 content lines + bottom border
+_ANSI_RE = re.compile(r"\033\[[0-9;]*m")
+_GREY_LOG_RE = re.compile(r"(\033\[0m)(.+)", re.DOTALL)
+
+
+def _vis_len(s: str) -> int:
+    """Return visible (printed) column width of *s*, ignoring ANSI escapes."""
+    return len(_ANSI_RE.sub("", s))
 
 
 class DashboardInput:
@@ -85,7 +95,6 @@ class RecorderDashboard:
         self._device_lines_printed: int = 0
         self._meter_active: bool = False
         self._is_tty: bool = sys.stdout.isatty()
-        self._update_count: int = 0
 
     def __enter__(self) -> RecorderDashboard:
         return self
@@ -155,38 +164,62 @@ class RecorderDashboard:
         gauge_hold: float,
         status_lines: Sequence[str],
     ) -> None:
-        # Reserve enough columns for all fixed-width fields so the bar adapts
-        # to the terminal width.  If the line would wrap, \r cannot return to
-        # the start of the status, causing a new line on every update.
         term_w = shutil.get_terminal_size(fallback=(80, 24)).columns
-        # Fixed overhead (visible chars, conservative estimate):
-        #   '● REC ' (6) + elapsed max 8 + '  ' (2) + '[' + ']' + '  ' (4)
-        #   + peak_text ~11 + optional alert ~7 + '  cpu XX.X%  ram XX.X%' ~22
-        #   + ' t:NNN' tick counter ~6
-        fixed_overhead = 68
-        bar_w = max(_BAR_WIDTH_MIN, term_w - fixed_overhead)
-        # When gauge_live == 0.0 AND gauge_hold == 0.0 the signal is at or
-        # below the floor; show a distinct pattern so it doesn't look frozen.
+        # Box: '+' + '-'*(term_w-2) + '+' = exactly term_w chars wide.
+        # Content between '| ' and ' |' is term_w-4 visible chars.
+        content_w = max(44, term_w - 4)
+        bar_w = max(_BAR_WIDTH_MIN, content_w - 2)  # '[' + bar_w chars + ']'
+
+        # ── Line 1: ● REC (red) + elapsed (amber) ────────────────────────────
+        line1 = f"\033[1;31m\u25cf REC\033[0m  \033[33m{elapsed_text}\033[0m"
+
+        # ── Line 2: level meter bar (amber) ──────────────────────────────────
         if gauge_live == 0.0 and gauge_hold == 0.0:
-            bar = "[" + "-" * bar_w + "]"
+            bar_raw = "[" + "-" * bar_w + "]"
         else:
-            bar = _build_bar(gauge_live, gauge_hold, width=bar_w)
+            bar_raw = _build_bar(gauge_live, gauge_hold, width=bar_w)
+        line2 = f"\033[33m{bar_raw}\033[0m"
+
+        # ── Line 3: numeric values (grey) ────────────────────────────────────
+        peak_plain = _ANSI_RE.sub("", peak_text)
+        hold_plain = _ANSI_RE.sub("", hold_text)
         if alert_text not in {"-", ""}:
-            alert = f" \033[1;31m[{alert_text}]\033[0m"
+            alert_part = f"  \033[1;31m[{alert_text}]\033[0m"
         else:
-            alert = ""
-        # Tick counter: increments on every call; proves the line is updating.
-        self._update_count += 1
-        tick = self._update_count % 1000
-        line = (
-            f"\r\033[K"
-            f"\033[1;32m● REC\033[0m {elapsed_text}  "
-            f"{bar}  "
-            f"{peak_text}{alert}  "
-            f"cpu {cpu_percent}  ram {ram_percent}"
-            f"  \033[2mt:{tick:03d}\033[0m"
+            alert_part = ""
+        line3 = (
+            f"\033[90m{peak_plain}  {hold_plain}"
+            f"  cpu {cpu_percent}  ram {ram_percent}\033[0m{alert_part}"
         )
-        sys.stdout.write(line)
+
+        # ── Line 4: hotkeys (S / R / Q with white background) ────────────────
+        s_key = "\033[47m\033[30m S \033[0m"
+        r_key = "\033[47m\033[30m R \033[0m"
+        q_key = "\033[47m\033[30m Q \033[0m"
+        line4 = f"{s_key} STOP  {r_key} RESTART  {q_key} SAVE AND QUIT"
+
+        # ── Build ASCII box ───────────────────────────────────────────────────
+        border = "+" + "-" * (content_w + 2) + "+"
+
+        def _box_row(content: str) -> str:
+            pad = max(0, content_w - _vis_len(content))
+            return f"| {content}{' ' * pad} |"
+
+        box = [
+            border,
+            _box_row(line1),
+            _box_row(line2),
+            _box_row(line3),
+            _box_row(line4),
+            border,
+        ]
+
+        if self._meter_active:
+            sys.stdout.write(f"\033[{_BOX_LINES}A")
+
+        for row in box:
+            sys.stdout.write(f"\033[2K\r{row}\n")
+
         sys.stdout.flush()
         self._meter_active = True
 
@@ -197,7 +230,12 @@ class RecorderDashboard:
     def log(self, message: str) -> None:
         self._end_device_list()
         self._end_meter_line()
-        print(message, flush=True)
+        # Grey out body text after the first ANSI reset (\033[0m) that follows
+        # a [TAG] label.  Plain messages (no ANSI codes) are greyed entirely.
+        greyed = _GREY_LOG_RE.sub(r"\1\033[90m\2\033[0m", message, count=1)
+        if greyed == message:
+            greyed = f"\033[90m{message}\033[0m"
+        print(greyed, flush=True)
 
     def prompt_choice(self, title: str, message: str, options: Sequence[str]) -> int:
         self._end_device_list()
@@ -238,8 +276,8 @@ class RecorderDashboard:
 
     def _end_meter_line(self) -> None:
         if self._meter_active:
-            sys.stdout.write("\n")
-            sys.stdout.flush()
+            # Cursor is already below the box (each box line ends with \n).
+            # Just mark the box as no longer active.
             self._meter_active = False
 
     def _end_device_list(self) -> None:
