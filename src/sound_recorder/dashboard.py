@@ -26,7 +26,7 @@ STYLE_GREEN = "bold green"
 STYLE_YELLOW = "bold yellow"
 STYLE_RED = "bold red"
 STYLE_DIM = "grey62"
-METER_FLOOR_DBFS = -60.0
+METER_FLOOR_DBFS = -30.0
 DEVICE_METER_WIDTH = 18
 
 
@@ -254,18 +254,18 @@ class RecorderDashboard:
         layout = Layout()
         layout.split_column(
             Layout(name="gauge", size=8),
+            Layout(name="title", size=4),
             Layout(name="middle", ratio=2),
             Layout(name="log", size=12),
         )
         layout["middle"].split_row(
-            Layout(name="status", ratio=4),
+            Layout(name="rec", ratio=4),
             Layout(name="system", ratio=2),
-            Layout(name="title", ratio=3),
         )
         layout["gauge"].update(self._gauge_panel())
-        layout["status"].update(self._status_panel())
-        layout["system"].update(self._system_panel())
         layout["title"].update(self._title_panel())
+        layout["rec"].update(self._rec_panel())
+        layout["system"].update(self._system_panel())
         layout["log"].update(self._log_panel())
         return layout
 
@@ -339,6 +339,12 @@ class RecorderDashboard:
         body = Align.center(Text(self.state.title_text, style=style, justify="center"), vertical="middle")
         return Panel(body, title="Title", border_style=style, box=box.HEAVY)
 
+    def _rec_panel(self) -> Panel:
+        rec_marker = Align.center(Text("\u25cf REC", style=STYLE_RED))
+        elapsed = Align.center(Text(self.state.elapsed_text, style="bold bright_green"))
+        body = Align.center(Group(rec_marker, Text(""), elapsed), vertical="middle")
+        return Panel(body, title="Length", border_style=STYLE_RED, box=box.DOUBLE)
+
     def _system_panel(self) -> Panel:
         table = Table.grid(expand=True)
         table.add_column(style=STYLE_CYAN)
@@ -393,7 +399,7 @@ class RecorderDashboard:
         return meter
 
     def _build_scale_text(self, width: int) -> Text:
-        tick_labels = ["-60", "-36", "-24", "-12", "-6", "0 dBFS"]
+        tick_labels = ["-30", "-18", "-12", "-6", "-3", "0 dBFS"]
         if width <= len(tick_labels[-1]):
             return Text(" ".join(tick_labels), style=STYLE_DIM)
         columns = [int(round(index * (width - 1) / (len(tick_labels) - 1))) for index in range(len(tick_labels))]

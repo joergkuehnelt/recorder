@@ -6,7 +6,6 @@ import re
 import shlex
 import shutil
 import subprocess
-import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -64,23 +63,10 @@ def maybe_start_playlist_companion(
     documents_dir: Optional[Path] = None,
     state_path: Path = LOCAL_STATE_PATH,
 ) -> PlaylistLaunchResult:
-    if not sys.stdin.isatty() or not sys.stdout.isatty():
-        return PlaylistLaunchResult(
-            started=False,
-            status_message="Playlist helper skipped in non-interactive mode.",
-            status_kind="skip",
-        )
-
     documents_root = (documents_dir or (Path.home() / "Documents")).expanduser().resolve()
     state = _load_local_state(state_path)
     remembered_script = _resolve_saved_path(state.get("playlist_script_path"))
     if remembered_script is None:
-        if not _should_scan_for_playlist_script(input_func=input_func, print_func=print_func):
-            return PlaylistLaunchResult(
-                started=False,
-                status_message="Playlist helper skipped. Recording continues immediately.",
-                status_kind="skip",
-            )
         print_func("Scanning Documents for playlist scripts...")
 
     candidates = discover_playlist_script_candidates(documents_root, remembered_script)
@@ -99,39 +85,6 @@ def maybe_start_playlist_companion(
 
     state["playlist_script_path"] = str(selected_script)
     _save_local_state(state_path, state)
-
-    already_running = _is_script_running(selected_script)
-    if already_running:
-        song_history_path = find_song_history_log(
-            documents_root=documents_root,
-            script_path=selected_script,
-            remembered_path=_resolve_saved_path(state.get("song_history_log_path")),
-        )
-        if song_history_path is not None:
-            state["song_history_log_path"] = str(song_history_path)
-            _save_local_state(state_path, state)
-
-        last_state_path = find_last_state_file(
-            documents_root=documents_root,
-            script_path=selected_script,
-            remembered_path=_resolve_saved_path(state.get("last_state_json_path")),
-        )
-        if last_state_path is not None:
-            state["last_state_json_path"] = str(last_state_path)
-            _save_local_state(state_path, state)
-
-        last_entry = read_last_song_history_entry(song_history_path) if song_history_path else None
-        last_state_entry = read_last_state_entry(last_state_path) if last_state_path else None
-        return PlaylistLaunchResult(
-            started=True,
-            script_path=selected_script,
-            song_history_path=song_history_path,
-            last_entry=last_entry,
-            last_state_path=last_state_path,
-            last_state_entry=last_state_entry,
-            status_message=f"Playlist helper already running: {selected_script.name}",
-            status_kind="success",
-        )
 
     launch_command = build_script_launch_command(selected_script)
     launched = _launch_script_in_terminal(launch_command)
