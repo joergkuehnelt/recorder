@@ -39,7 +39,7 @@ PARTIAL_FILE_SUFFIX = ".partial.m4a"
 SESSION_LOCK_NAME = ".recording-session.json"
 PARTIAL_FILE_PATTERN = re.compile(r"^\.(\d{8})-(\d{6})\.partial\.m4a$")
 ARMING_DURATION_SECONDS = 3.0
-METER_REFRESH_SECONDS = 0.02
+METER_REFRESH_SECONDS = 0.015
 METER_FLOOR_DBFS = -60.0
 SAFE_TARGET_PEAK_DBFS = -9.0
 WARNING_PEAK_DBFS = -3.0
@@ -48,8 +48,8 @@ WARNING_GAIN_STEP_DB = -4.0
 WARNING_GAIN_COOLDOWN_SECONDS = 2.0
 MIN_CHANNEL_VOLUME = 0.10
 MAX_CHANNEL_VOLUME = 1.00
-METER_BAR_WIDTH = 44
-PEAK_HOLD_DECAY_DB_PER_SECOND = 18.0
+METER_BAR_WIDTH = 52
+PEAK_HOLD_DECAY_DB_PER_SECOND = 42.0
 LAST_STATE_REFRESH_SECONDS = 1.0
 SONG_HISTORY_MATCH_WINDOW_SECONDS = 90.0
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -642,7 +642,6 @@ class ChunkedAudioRecorder(NSObject):
         hold_dbfs = self._update_peak_hold(clamped_peak)
         hold_normalized = 1.0 - (abs(hold_dbfs) / abs(METER_FLOOR_DBFS))
         hold_index = max(0, min(METER_BAR_WIDTH - 1, int(round(hold_normalized * (METER_BAR_WIDTH - 1)))))
-        bar = self._build_colored_meter_bar(filled, hold_index)
         warning = ""
         if peak_dbfs >= self.clip_peak_dbfs:
             warning = self._ansi_style(" CLIP", ANSI_RED, bold=True)
@@ -665,7 +664,6 @@ class ChunkedAudioRecorder(NSObject):
         warning_text = "CLIP" if peak_dbfs >= self.clip_peak_dbfs else "HOT" if peak_dbfs >= self.warning_peak_dbfs else "-"
         cpu_percent, ram_percent = self._current_process_stats()
         eq_band_levels = self._update_eq_band_levels(clamped_peak)
-        meter_text = f"{mode_label} <{bar}>"
         table_rows = [
             ("Mode", "REC" if mode == "REC" else "ARM", "default"),
             ("Len", elapsed_text, "default"),
@@ -678,7 +676,15 @@ class ChunkedAudioRecorder(NSObject):
             ("Alert", warning_text, "default"),
             ("Keys", "S stop | R restart" if mode == "REC" else "Waiting for REC", "default"),
         ]
-        dashboard_lines = self._build_meter_panel(meter_text)
+        dashboard_lines = self._build_meter_panel(
+            mode_label=mode_label,
+            normalized=normalized,
+            hold_normalized=hold_normalized,
+            peak_label=peak_label,
+            hold_label=hold_label,
+            gain_label=gain_label,
+            warning=warning,
+        )
         if mode == "REC":
             dashboard_lines.extend(self._build_elapsed_panel(elapsed_text))
             dashboard_lines.extend(self._build_equalizer_panel(eq_band_levels))
@@ -766,18 +772,44 @@ class ChunkedAudioRecorder(NSObject):
 
         self.meter_header_rendered = True
 
-    def _build_meter_panel(self, meter_text: str) -> List[str]:
-        meter_visible_width = len(self._strip_ansi(meter_text))
-        inner_width = max(meter_visible_width + 2, 24)
-        border = self._ansi_style(f"+{'-' * inner_width}+", ANSI_GREEN, bold=True)
-        padding = max(0, inner_width - meter_visible_width - 2)
-        content = (
-            self._ansi_style("| ", ANSI_GREEN, bold=True)
-            + meter_text
-            + " " * padding
-            + self._ansi_style(" |", ANSI_GREEN, bold=True)
+    def _build_meter_panel(
+        self,
+        mode_label: str,
+        normalized: float,
+        hold_normalized: float,
+        peak_label: str,
+        hold_label: str,
+        gain_label: str,
+        warning: str,
+    ) -> List[str]:
+        gauge = self._build_peak_gauge(normalized, hold_normalized)
+        scale = self._build_peak_gauge_scale()
+        legend = (
+            f"{self._ansi_style('^ live', ANSI_GREEN, bold=True)}  "
+            f"{self._ansi_style('| hold', ANSI_CYAN, bold=True)}  "
+            f"peak {peak_label}  {hold_label}  gain {gain_label}{warning}"
         )
-        return [border, content, border, ""]
+        title = f" {mode_label} PEAK GAUGE :: FAST :: SHORT HOLD "
+        inner_width = max(
+            len(self._strip_ansi(title)),
+            len(self._strip_ansi(scale)),
+            len(self._strip_ansi(gauge)),
+            len(self._strip_ansi(legend)),
+            32,
+        )
+        border = self._ansi_style(f"+{'-' * inner_width}+", ANSI_GREEN, bold=True)
+        lines = [border]
+        for content in (title, scale, gauge, legend):
+            visible_width = len(self._strip_ansi(content))
+            padding = max(0, inner_width - visible_width)
+            lines.append(
+                self._ansi_style("|", ANSI_GREEN, bold=True)
+                + content
+                + " " * padding
+                + self._ansi_style("|", ANSI_GREEN, bold=True)
+            )
+        lines.extend([border, ""])
+        return lines
 
     def _build_elapsed_panel(self, elapsed_text: str) -> List[str]:
         art_lines = self._render_elapsed_ascii(elapsed_text)
@@ -1160,6 +1192,53 @@ class ChunkedAudioRecorder(NSObject):
     def _decorate_message(self, label: str, message: str, color: str) -> str:
         tag = self._ansi_style(f"[{label}]", color, bold=True)
         return f"{tag} {message}"
+
+    def _build_peak_gauge_scale(self) -> str:
+        tick_labels = ["-60", "-48", "-36", "-24", "-12", "  0"]
+        if len(tick_labels) == 1:
+            return tick_labels[0]
+        span = max(1, METER_BAR_WIDTH - 1)
+        columns = [int(round(index * span / (len(tick_labels) - 1))) for index in range(len(tick_labels))]
+        chars = [" " for _ in range(METER_BAR_WIDTH)]
+        for column, label in zip(columns, tick_labels):
+            start = max(0, min(METER_BAR_WIDTH - len(label), column - (len(label) // 2)))
+            for offset, char in enumerate(label):
+                chars[start + offset] = char
+        return self._ansi_style("".join(chars), ANSI_DIM)
+
+    def _build_peak_gauge(self, normalized: float, hold_normalized: float) -> str:
+        live_index = max(0, min(METER_BAR_WIDTH - 1, int(round(normalized * (METER_BAR_WIDTH - 1)))))
+        hold_index = max(0, min(METER_BAR_WIDTH - 1, int(round(hold_normalized * (METER_BAR_WIDTH - 1)))))
+        green_limit = int(round(METER_BAR_WIDTH * 0.60))
+        yellow_limit = int(round(METER_BAR_WIDTH * 0.85))
+
+        gauge_chars: List[str] = []
+        for index in range(METER_BAR_WIDTH):
+            if index < live_index:
+                color = ANSI_GREEN
+                char = "="
+                if index >= yellow_limit:
+                    color = ANSI_RED
+                    char = "X"
+                elif index >= green_limit:
+                    color = ANSI_YELLOW
+                    char = "*"
+                gauge_chars.append(self._ansi_style(char, color, bold=True))
+                continue
+            if index == live_index:
+                color = ANSI_GREEN
+                if index >= yellow_limit:
+                    color = ANSI_RED
+                elif index >= green_limit:
+                    color = ANSI_YELLOW
+                gauge_chars.append(self._ansi_style("^", color, bold=True))
+                continue
+            if index == hold_index:
+                gauge_chars.append(self._ansi_style("|", ANSI_CYAN, bold=True))
+                continue
+            gauge_chars.append(self._ansi_style(".", ANSI_DIM))
+
+        return "[" + "".join(gauge_chars) + "]"
 
     def _build_colored_meter_bar(self, filled: int, hold_index: int) -> str:
         parts = []
