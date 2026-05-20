@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import select
+import shutil
 import sys
 import termios
 import tty
@@ -9,7 +10,8 @@ from collections import deque
 from typing import List, Optional, Sequence
 
 METER_FLOOR_DBFS = -30.0
-_BAR_WIDTH = 40
+# _BAR_WIDTH is computed dynamically; this is the minimum.
+_BAR_WIDTH_MIN = 8
 _DEVICE_BAR_WIDTH = 16
 
 
@@ -152,7 +154,16 @@ class RecorderDashboard:
         gauge_hold: float,
         status_lines: Sequence[str],
     ) -> None:
-        bar = _build_bar(gauge_live, gauge_hold)
+        # Reserve enough columns for all fixed-width fields so the bar adapts
+        # to the terminal width.  If the line would wrap, \r cannot return to
+        # the start of the status, causing a new line on every update.
+        term_w = shutil.get_terminal_size(fallback=(80, 24)).columns
+        # Fixed overhead (visible chars, conservative estimate):
+        #   '● REC ' (6) + elapsed max 8 + '  ' (2) + '[' + ']' + '  ' (4)
+        #   + peak_text ~11 + optional alert ~7 + '  cpu XX.X%  ram XX.X%' ~22
+        fixed_overhead = 62
+        bar_w = max(_BAR_WIDTH_MIN, term_w - fixed_overhead)
+        bar = _build_bar(gauge_live, gauge_hold, width=bar_w)
         if alert_text not in {"-", ""}:
             alert = f" \033[1;31m[{alert_text}]\033[0m"
         else:
@@ -245,7 +256,7 @@ class RecorderDashboard:
 # Module-level bar builders
 # ---------------------------------------------------------------------------
 
-def _build_bar(live: float, hold: float, width: int = _BAR_WIDTH) -> str:
+def _build_bar(live: float, hold: float, width: int = 20) -> str:
     live_index = max(0, min(width - 1, int(round(live * (width - 1)))))
     hold_index = max(0, min(width - 1, int(round(hold * (width - 1)))))
     chars: List[str] = []
