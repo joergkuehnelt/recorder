@@ -97,11 +97,17 @@ def main() -> int:
 
     with RecorderDashboard(log_size=10) as dashboard:
         dashboard.show_setup_status(
-            "Native macOS Apple Silicon rolling audio recorder.",
-            "Use Up/Down and Enter to choose a device.",
+            "Checking playlist helper state.",
+            "A remembered helper is started automatically when it is not already running.",
+            stage="setup",
+        )
+        _maybe_start_playlist_helper(dashboard)
+        dashboard.show_setup_status(
+            "Scanning live input levels.",
+            "Choose your input with Up/Down and Enter. The recording dashboard opens after selection.",
+            stage="device",
         )
         device = _select_device(devices, dashboard)
-        _maybe_start_playlist_helper(dashboard)
 
         recorder = build_recorder(
             device_id=device.unique_id,
@@ -123,18 +129,23 @@ def main() -> int:
 
 
 def _select_device(devices: List[InputDevice], dashboard: RecorderDashboard) -> InputDevice:
+    from sound_recorder.devices import InputLevelMonitor
+
     dashboard.set_device_choices([device.name for device in devices])
-    with DashboardInput() as dashboard_input:
-        while True:
-            key = dashboard_input.read_key(timeout=0.1)
-            if key == "up":
-                dashboard.move_device_selection(-1)
-            elif key == "down":
-                dashboard.move_device_selection(1)
-            elif key == "enter":
-                selected = devices[dashboard.selected_device_index()]
-                dashboard.log(f"Selected input: {selected.name}")
-                return selected
+    with InputLevelMonitor([device.unique_id for device in devices]) as level_monitor:
+        with DashboardInput() as dashboard_input:
+            while True:
+                levels = level_monitor.poll_levels()
+                dashboard.update_device_levels([levels.get(device.unique_id) for device in devices])
+                key = dashboard_input.read_key(timeout=0.08)
+                if key == "up":
+                    dashboard.move_device_selection(-1)
+                elif key == "down":
+                    dashboard.move_device_selection(1)
+                elif key == "enter":
+                    selected = devices[dashboard.selected_device_index()]
+                    dashboard.log(f"Selected input: {selected.name}")
+                    return selected
 
 
 def _render_device_list(devices: List[InputDevice]) -> None:

@@ -49,7 +49,7 @@ WARNING_GAIN_COOLDOWN_SECONDS = 2.0
 MIN_CHANNEL_VOLUME = 0.10
 MAX_CHANNEL_VOLUME = 1.00
 METER_BAR_WIDTH = 52
-PEAK_HOLD_DECAY_DB_PER_SECOND = 42.0
+PEAK_HOLD_DECAY_DB_PER_SECOND = 72.0
 LAST_STATE_REFRESH_SECONDS = 1.0
 SONG_HISTORY_MATCH_WINDOW_SECONDS = 90.0
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -672,7 +672,8 @@ class ChunkedAudioRecorder(NSObject):
                 title_text=state_text,
                 cpu_percent=cpu_percent,
                 ram_percent=ram_percent,
-                gauge_text=self._strip_ansi(self._build_peak_gauge(normalized, hold_normalized)),
+                gauge_live=normalized,
+                gauge_hold=hold_normalized,
                 status_lines=[
                     f"Mode: {'Recording' if mode == 'REC' else 'Arming'}",
                     "Hotkeys: s stop, r restart, q stop after finalize.",
@@ -690,7 +691,6 @@ class ChunkedAudioRecorder(NSObject):
             )
             if mode == "REC":
                 dashboard_lines.extend(self._build_elapsed_panel(elapsed_text))
-                dashboard_lines.extend(self._build_equalizer_panel(eq_band_levels))
             dashboard_lines.extend(self._build_info_table(table_rows))
             self._render_status_block(dashboard_lines)
         self.last_meter_render_at = now

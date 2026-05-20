@@ -219,7 +219,7 @@ What to verify during this test:
 
 - `post_install_check.sh` reports `Python architecture: arm64`
 - `--list-devices` works during post-install verification
-- the recorder starts, shows device selection, completes arming, and enters the live dashboard
+- the recorder checks the playlist helper first, shows device selection with live input levels, completes arming, and enters the live dashboard
 - stopping the run finalizes a `.m4a` segment cleanly
 
 ## Usage
@@ -235,6 +235,8 @@ Start an interactive recording session:
 ```bash
 sound-recorder
 ```
+
+On startup the recorder checks whether the remembered playlist helper is already running, starts it automatically when needed, then shows input selection with live level meters before opening the full recording dashboard.
 
 Write recordings to a specific folder:
 

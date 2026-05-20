@@ -100,6 +100,39 @@ def maybe_start_playlist_companion(
     state["playlist_script_path"] = str(selected_script)
     _save_local_state(state_path, state)
 
+    already_running = _is_script_running(selected_script)
+    if already_running:
+        song_history_path = find_song_history_log(
+            documents_root=documents_root,
+            script_path=selected_script,
+            remembered_path=_resolve_saved_path(state.get("song_history_log_path")),
+        )
+        if song_history_path is not None:
+            state["song_history_log_path"] = str(song_history_path)
+            _save_local_state(state_path, state)
+
+        last_state_path = find_last_state_file(
+            documents_root=documents_root,
+            script_path=selected_script,
+            remembered_path=_resolve_saved_path(state.get("last_state_json_path")),
+        )
+        if last_state_path is not None:
+            state["last_state_json_path"] = str(last_state_path)
+            _save_local_state(state_path, state)
+
+        last_entry = read_last_song_history_entry(song_history_path) if song_history_path else None
+        last_state_entry = read_last_state_entry(last_state_path) if last_state_path else None
+        return PlaylistLaunchResult(
+            started=True,
+            script_path=selected_script,
+            song_history_path=song_history_path,
+            last_entry=last_entry,
+            last_state_path=last_state_path,
+            last_state_entry=last_state_entry,
+            status_message=f"Playlist helper already running: {selected_script.name}",
+            status_kind="success",
+        )
+
     launch_command = build_script_launch_command(selected_script)
     launched = _launch_script_in_terminal(launch_command)
     if not launched:
@@ -405,15 +438,7 @@ def _choose_playlist_script(
 ) -> Optional[Path]:
     if remembered_script is not None:
         print_func(f"Remembered playlist script: {remembered_script}")
-        while True:
-            answer = input_func("Start it now? [Y]es / [N]o / [C]hoose path > ").strip().lower()
-            if answer in {"", "y", "yes"}:
-                return remembered_script
-            if answer in {"n", "no"}:
-                return None
-            if answer in {"c", "choose"}:
-                break
-            print_func("Enter Y, N, or C.")
+        return remembered_script
 
     available = candidates[:]
     if not available:
@@ -423,13 +448,7 @@ def _choose_playlist_script(
     if len(available) == 1:
         only_script = available[0]
         print_func(f"Detected playlist script: {only_script}")
-        while True:
-            answer = input_func("Start it now? [Y/n] > ").strip().lower()
-            if answer in {"", "y", "yes"}:
-                return only_script
-            if answer in {"n", "no"}:
-                return None
-            print_func("Enter Y or N.")
+        return only_script
 
     print_func("Detected playlist script candidates:")
     for index, candidate in enumerate(available, start=1):
@@ -461,6 +480,20 @@ def _launch_script_in_terminal(command: str) -> bool:
     except (OSError, subprocess.SubprocessError):
         return False
     return True
+
+
+def _is_script_running(script_path: Path) -> bool:
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", str(script_path)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return False
+
+    return result.returncode == 0
 
 
 def _load_local_state(state_path: Path) -> Dict[str, str]:
