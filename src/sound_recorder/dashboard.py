@@ -9,7 +9,7 @@ import tty
 from collections import deque
 from typing import List, Optional, Sequence
 
-METER_FLOOR_DBFS = -30.0
+METER_FLOOR_DBFS = -60.0
 # _BAR_WIDTH is computed dynamically; this is the minimum.
 _BAR_WIDTH_MIN = 8
 _DEVICE_BAR_WIDTH = 16

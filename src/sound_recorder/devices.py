@@ -15,7 +15,7 @@ from AVFoundation import (
 from Foundation import NSDate, NSRunLoop
 
 
-METER_FLOOR_DBFS = -30.0
+METER_FLOOR_DBFS = -60.0
 
 
 @dataclass(frozen=True)
