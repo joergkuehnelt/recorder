@@ -135,8 +135,9 @@ class InputLevelMonitor:
             peak_values: List[float] = []
             for channel in entry.channels:
                 peak_value = float(channel.peakHoldLevel())
-                if not math.isfinite(peak_value):
+                if math.isnan(peak_value):
                     continue
+                # -inf is valid (silence); clamp to floor rather than discard
                 peak_values.append(max(METER_FLOOR_DBFS, min(0.0, peak_value)))
 
             if peak_values:
