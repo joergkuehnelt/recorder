@@ -162,6 +162,7 @@ class ChunkedAudioRecorder(NSObject):
         self.peak_hold_dbfs = METER_FLOOR_DBFS
         self.last_peak_sample_at = time.monotonic()
         self.last_state_display = "NO DETECTION"
+        self.last_state_changed_at: Optional[datetime] = None
         self.last_state_refresh_at = 0.0
         self.last_state_source_path: Optional[str] = None
         self.segment_track_events: List[SegmentTrackEvent] = []
@@ -624,6 +625,7 @@ class ChunkedAudioRecorder(NSObject):
                 elapsed_text = self._format_current_segment_elapsed()
                 state_text = self._current_last_state_text() if mode == "REC" else "Waiting for recording"
                 cpu_percent, ram_percent = self._current_process_stats()
+                title_time = self.last_state_changed_at.strftime("%H:%M") if self.last_state_changed_at else "--:--"
                 self.dashboard.update_recording(
                     elapsed_text=elapsed_text,
                     peak_text=f"{METER_FLOOR_DBFS:5.1f} dBFS",
@@ -631,6 +633,7 @@ class ChunkedAudioRecorder(NSObject):
                     gain_text=f"{self.current_channel_volume:.2f}",
                     alert_text="-",
                     title_text=state_text,
+                    title_time=title_time,
                     cpu_percent=cpu_percent,
                     ram_percent=ram_percent,
                     gauge_live=0.0,
@@ -682,6 +685,7 @@ class ChunkedAudioRecorder(NSObject):
         ]
         if self.dashboard is not None:
             del table_rows
+            title_time = self.last_state_changed_at.strftime("%H:%M") if self.last_state_changed_at else "--:--"
             self.dashboard.update_recording(
                 elapsed_text=elapsed_text,
                 peak_text=self._strip_ansi(peak_label),
@@ -689,6 +693,7 @@ class ChunkedAudioRecorder(NSObject):
                 gain_text=self._strip_ansi(gain_label),
                 alert_text=warning_text,
                 title_text=state_text,
+                title_time=title_time,
                 cpu_percent=cpu_percent,
                 ram_percent=ram_percent,
                 gauge_live=normalized,
@@ -904,7 +909,10 @@ class ChunkedAudioRecorder(NSObject):
             return self.last_state_display
 
         self.last_state_refresh_at = now
-        self.last_state_display = self._load_last_state_display()
+        new_display = self._load_last_state_display()
+        if new_display != self.last_state_display:
+            self.last_state_changed_at = datetime.now()
+        self.last_state_display = new_display
         if self.active_segment is not None:
             self._capture_segment_track_event(datetime.now())
         return self.last_state_display

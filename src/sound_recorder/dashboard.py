@@ -15,7 +15,7 @@ METER_FLOOR_DBFS = -60.0
 _BAR_WIDTH_MIN = 8
 _DEVICE_BAR_WIDTH = 16
 
-_BOX_LINES = 6  # top border + 4 content lines + bottom border
+_BOX_LINES = 7  # top border + 5 content lines + bottom border
 _ANSI_RE = re.compile(r"\033\[[0-9;]*m")
 _GREY_LOG_RE = re.compile(r"(\033\[0m)(.+)", re.DOTALL)
 
@@ -158,6 +158,7 @@ class RecorderDashboard:
         gain_text: str,
         alert_text: str,
         title_text: str,
+        title_time: str,
         cpu_percent: str,
         ram_percent: str,
         gauge_live: float,
@@ -194,11 +195,15 @@ class RecorderDashboard:
             f"  cpu {cpu_percent}  ram {ram_percent}\033[0m{alert_part}"
         )
 
-        # ── Line 4: hotkeys (S / R / Q with white background) ────────────────
+        # ── Line 4: last artist / title update (amber) ────────────────────────────
+        title_vis = _ANSI_RE.sub("", title_text)
+        line4 = f"\033[33m@{title_time} => {title_vis}\033[0m"
+
+        # ── Line 5: hotkeys – badges white, label text grey ────────────────────────
         s_key = "\033[47m\033[30m S \033[0m"
         r_key = "\033[47m\033[30m R \033[0m"
         q_key = "\033[47m\033[30m Q \033[0m"
-        line4 = f"{s_key} STOP  {r_key} RESTART  {q_key} SAVE AND QUIT"
+        line5 = f"{s_key}\033[90m STOP  \033[0m{r_key}\033[90m RESTART  \033[0m{q_key}\033[90m SAVE AND QUIT\033[0m"
 
         # ── Build ASCII box ───────────────────────────────────────────────────
         border = "+" + "-" * (content_w + 2) + "+"
@@ -213,6 +218,7 @@ class RecorderDashboard:
             _box_row(line2),
             _box_row(line3),
             _box_row(line4),
+            _box_row(line5),
             border,
         ]
 
