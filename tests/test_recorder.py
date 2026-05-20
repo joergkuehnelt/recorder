@@ -248,6 +248,60 @@ class TestBuildRecorder:
         assert rec.is_configured is False
 
 
+class TestRuntimeCommandInput:
+    @pytest.fixture()
+    def recorder(self, tmp_path):
+        from sound_recorder.recorder import build_recorder
+
+        return build_recorder(
+            device_id="tty-test",
+            output_dir=tmp_path / "out",
+            segment_minutes=1,
+        )
+
+    def test_poll_runtime_command_disables_input_after_select_error(self, recorder, monkeypatch):
+        from sound_recorder import recorder as recorder_module
+
+        recorder.command_input_enabled = True
+        recorder.stdin_fd = 7
+        recorder.stdin_termios_state = ["saved"]
+
+        def raise_select_error(*_args, **_kwargs):
+            raise OSError("tty gone")
+
+        restored = []
+
+        monkeypatch.setattr(recorder_module.select, "select", raise_select_error)
+        monkeypatch.setattr(recorder_module.termios, "tcsetattr", lambda *args: restored.append(args))
+
+        recorder._poll_runtime_command()
+
+        assert recorder.command_input_enabled is False
+        assert recorder.stdin_fd is None
+        assert recorder.stdin_termios_state is None
+        assert restored
+
+    def test_poll_runtime_command_disables_input_after_read_error(self, recorder, monkeypatch):
+        from sound_recorder import recorder as recorder_module
+
+        recorder.command_input_enabled = True
+        recorder.stdin_fd = 7
+        recorder.stdin_termios_state = ["saved"]
+
+        monkeypatch.setattr(recorder_module.select, "select", lambda *_args, **_kwargs: ([7], [], []))
+        monkeypatch.setattr(recorder_module.os, "read", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("read failed")))
+
+        restored = []
+        monkeypatch.setattr(recorder_module.termios, "tcsetattr", lambda *args: restored.append(args))
+
+        recorder._poll_runtime_command()
+
+        assert recorder.command_input_enabled is False
+        assert recorder.stdin_fd is None
+        assert recorder.stdin_termios_state is None
+        assert restored
+
+
 class TestCueSidecar:
     def test_write_segment_sidecar_creates_json_payload(self, tmp_path):
         from sound_recorder.recorder import CombinedTrackEvent, build_recorder

@@ -182,6 +182,9 @@ class ChunkedAudioRecorder(NSObject):
         self.status_line_count = 0
         self.cached_terminal_width = 0
         self.last_terminal_width_check_at = 0.0
+        self.cached_cpu_percent = "0.0%"
+        self.cached_ram_percent = "0.0%"
+        self.last_process_stats_refresh_at = 0.0
         self.use_color_output = sys.stdout.isatty()
         self.command_input_enabled = sys.stdin.isatty()
         self.stdin_fd: Optional[int] = None
@@ -448,6 +451,8 @@ class ChunkedAudioRecorder(NSObject):
         try:
             readable, _, _ = select.select([self.stdin_fd], [], [], 0)
         except (OSError, ValueError):
+            self._disable_runtime_command_input()
+            self.command_input_enabled = False
             return
 
         if not readable:
@@ -456,6 +461,8 @@ class ChunkedAudioRecorder(NSObject):
         try:
             command = os.read(self.stdin_fd, 1).decode("utf-8", errors="ignore").lower()
         except OSError:
+            self._disable_runtime_command_input()
+            self.command_input_enabled = False
             return
 
         if command == "s":
@@ -650,16 +657,19 @@ class ChunkedAudioRecorder(NSObject):
         elapsed_text = self._format_current_segment_elapsed()
         state_text = self._current_last_state_text() if mode == "REC" else "Waiting for recording"
         warning_text = "CLIP" if peak_dbfs >= self.clip_peak_dbfs else "HOT" if peak_dbfs >= self.warning_peak_dbfs else "-"
+        cpu_percent, ram_percent = self._current_process_stats()
         meter_text = f"{mode_label} <{bar}>"
         table_rows = [
-            ("Mode", "REC" if mode == "REC" else "ARM"),
-            ("Len", elapsed_text),
-            ("Peak", f"{peak_dbfs:5.1f} dBFS"),
-            ("Hold", f"{hold_dbfs:5.1f} dBFS"),
-            ("Gain", f"{self.current_channel_volume:.2f}"),
-            ("Now", state_text),
-            ("Alert", warning_text),
-            ("Keys", "S stop | R restart" if mode == "REC" else "Waiting for REC"),
+            ("Mode", "REC" if mode == "REC" else "ARM", "default"),
+            ("Len", elapsed_text, "default"),
+            ("Peak", f"{peak_dbfs:5.1f} dBFS", "default"),
+            ("Hold", f"{hold_dbfs:5.1f} dBFS", "default"),
+            ("Gain", f"{self.current_channel_volume:.2f}", "default"),
+            ("CPU", cpu_percent, "default"),
+            ("RAM", ram_percent, "default"),
+            ("Title", state_text, "highlight"),
+            ("Alert", warning_text, "default"),
+            ("Keys", "S stop | R restart" if mode == "REC" else "Waiting for REC", "default"),
         ]
         dashboard_lines = self._build_meter_panel(meter_text)
         if mode == "REC":
@@ -767,7 +777,7 @@ class ChunkedAudioRecorder(NSObject):
             return [""]
         return art_lines + [""]
 
-    def _build_info_table(self, rows: List[tuple[str, str]]) -> List[str]:
+    def _build_info_table(self, rows: List[tuple[str, str, str]]) -> List[str]:
         terminal_width = self._get_terminal_width(minimum=48)
         max_table_width = min(terminal_width, 88)
         key_width = max(4, min(8, max(len(label) for label, _ in rows)))
@@ -779,20 +789,51 @@ class ChunkedAudioRecorder(NSObject):
         )
 
         lines = [border]
-        for label, value in rows:
+        for label, value, row_kind in rows:
             fitted_label = self._truncate_plain_text(label, key_width)
             fitted_value = self._truncate_plain_text(value, value_width)
-            label_cell = self._ansi_style(f" {fitted_label:<{key_width}} ", ANSI_YELLOW, bold=True)
-            value_cell = self._ansi_style(f" {fitted_value:<{value_width}} ", ANSI_RESET + ANSI_ORANGE, bold=True)
+            label_color = ANSI_YELLOW
+            value_color = ANSI_ORANGE
+            border_color = ANSI_ORANGE
+            if row_kind == "highlight":
+                label_color = ANSI_RED if fitted_value == "NO DETECTION" else ANSI_YELLOW
+                value_color = ANSI_YELLOW if fitted_value == "NO DETECTION" else ANSI_GREEN
+                border_color = ANSI_YELLOW if fitted_value == "NO DETECTION" else ANSI_GREEN
+                fitted_value = self._truncate_plain_text(f">> {value} <<", value_width)
+
+            label_cell = self._ansi_style(f" {fitted_label:<{key_width}} ", label_color, bold=True)
+            value_cell = self._ansi_style(f" {fitted_value:<{value_width}} ", value_color, bold=True)
             lines.append(
-                f"{self._ansi_style('|', ANSI_ORANGE, bold=True)}"
+                f"{self._ansi_style('|', border_color, bold=True)}"
                 f"{label_cell}"
-                f"{self._ansi_style('|', ANSI_ORANGE, bold=True)}"
+                f"{self._ansi_style('|', border_color, bold=True)}"
                 f"{value_cell}"
-                f"{self._ansi_style('|', ANSI_ORANGE, bold=True)}"
+                f"{self._ansi_style('|', border_color, bold=True)}"
             )
         lines.append(border)
         return lines
+
+    def _current_process_stats(self) -> tuple[str, str]:
+        now = time.monotonic()
+        if now - self.last_process_stats_refresh_at < 1.0:
+            return self.cached_cpu_percent, self.cached_ram_percent
+
+        self.last_process_stats_refresh_at = now
+        try:
+            output = subprocess.check_output(
+                ["ps", "-o", "%cpu=", "-o", "%mem=", "-p", str(os.getpid())],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+            if output:
+                parts = output.split()
+                if len(parts) >= 2:
+                    self.cached_cpu_percent = f"{float(parts[0]):.1f}%"
+                    self.cached_ram_percent = f"{float(parts[1]):.1f}%"
+        except (OSError, subprocess.SubprocessError, ValueError):
+            pass
+
+        return self.cached_cpu_percent, self.cached_ram_percent
 
     def _current_last_state_text(self) -> str:
         now = time.monotonic()
