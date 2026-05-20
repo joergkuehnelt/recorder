@@ -85,6 +85,7 @@ class RecorderDashboard:
         self._device_lines_printed: int = 0
         self._meter_active: bool = False
         self._is_tty: bool = sys.stdout.isatty()
+        self._update_count: int = 0
 
     def __enter__(self) -> RecorderDashboard:
         return self
@@ -161,19 +162,29 @@ class RecorderDashboard:
         # Fixed overhead (visible chars, conservative estimate):
         #   '● REC ' (6) + elapsed max 8 + '  ' (2) + '[' + ']' + '  ' (4)
         #   + peak_text ~11 + optional alert ~7 + '  cpu XX.X%  ram XX.X%' ~22
-        fixed_overhead = 62
+        #   + ' t:NNN' tick counter ~6
+        fixed_overhead = 68
         bar_w = max(_BAR_WIDTH_MIN, term_w - fixed_overhead)
-        bar = _build_bar(gauge_live, gauge_hold, width=bar_w)
+        # When gauge_live == 0.0 AND gauge_hold == 0.0 the signal is at or
+        # below the floor; show a distinct pattern so it doesn't look frozen.
+        if gauge_live == 0.0 and gauge_hold == 0.0:
+            bar = "[" + "-" * bar_w + "]"
+        else:
+            bar = _build_bar(gauge_live, gauge_hold, width=bar_w)
         if alert_text not in {"-", ""}:
             alert = f" \033[1;31m[{alert_text}]\033[0m"
         else:
             alert = ""
+        # Tick counter: increments on every call; proves the line is updating.
+        self._update_count += 1
+        tick = self._update_count % 1000
         line = (
             f"\r\033[K"
             f"\033[1;32m● REC\033[0m {elapsed_text}  "
             f"{bar}  "
             f"{peak_text}{alert}  "
             f"cpu {cpu_percent}  ram {ram_percent}"
+            f"  \033[2mt:{tick:03d}\033[0m"
         )
         sys.stdout.write(line)
         sys.stdout.flush()

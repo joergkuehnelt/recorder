@@ -126,7 +126,11 @@ def main() -> int:
             f"Target {args.target_peak_dbfs:.0f} dBFS  "
             f"Warn {args.warning_peak_dbfs:.0f} dBFS"
         )
-        recorder.run()
+        try:
+            recorder.run()
+        except Exception as exc:  # noqa: BLE001
+            dashboard.log(f"\033[1;31m[FATAL]\033[0m {exc}")
+            return 1
     return 0
 
 
